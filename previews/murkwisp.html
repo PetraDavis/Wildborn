@@ -1,0 +1,126 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Murkwisp Preview</title>
+<style>:root{--bg:#121022;--fg:#eeeaff;--mute:#b4add2;--acc:#8a6bff;--plate:rgba(16,14,32,.8)}body{margin:0;background:var(--bg);color:var(--fg);font:14px system-ui,-apple-system,sans-serif;overflow:hidden}
+#view{position:fixed;inset:0}#ui{position:fixed;left:16px;right:16px;bottom:16px;display:flex;flex-direction:column;gap:10px;pointer-events:none;max-width:560px}
+.plate{background:var(--plate);border:1px solid rgba(170,150,255,.28);border-radius:14px;padding:12px 14px;pointer-events:auto}
+h1{margin:0 0 4px;font-size:20px}p{margin:0;color:var(--mute);line-height:1.4}.row{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+button{font:inherit;font-weight:700;border-radius:999px;border:1px solid rgba(170,150,255,.4);background:transparent;color:var(--fg);padding:6px 12px;cursor:pointer}button.on{background:var(--acc);color:#120c2a;border-color:var(--acc)}
+ul{margin:8px 0 0;padding-left:18px;color:var(--mute)}li{margin:2px 0}summary{cursor:pointer;margin-top:8px;color:var(--acc);font-weight:700}.stats{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.stats div{background:rgba(138,107,255,.14);border-radius:999px;padding:3px 10px;font-size:12px;color:var(--mute)}.stats b{color:var(--fg);margin-right:4px}</style></head><body><div id="view"></div>
+<div id="ui"><div class="plate"><h1>Murkwisp</h1><p>A living shadow that burrows by melting into the ground. Drag to spin, scroll to zoom.</p>
+<div class="row"><button data-st="0">Speck</button><button data-st="1">Shade</button><button data-st="2" class="on">Murkwisp</button><button data-st="3">Elder Murk</button><button id="cmp">All 4</button></div>
+<div class="row"><button data-m="idle" class="on">Float</button><button data-m="move">Drift</button><button data-m="melt">Melt into ground</button><button data-m="slide">Slide underneath</button><button data-m="attack">Attack</button><button data-m="sleep">Sleep</button></div>
+<div id="stats" class="stats"></div>
+<details><summary>How it works</summary><ul><li>No legs: it drifts low over the grass</li><li>Melts into the earth like spilled ink, leaving a dark puddle</li><li>Slides along underground as a dark ripple, eyes peeking up now and then</li><li>Gets more wisps, brighter eyes and (as an Elder) a crown of smoke as it grows</li></ul></details></div></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script><script>(function(){
+// ===== creature game: Murkwisp, a shadow being (original, not based on an animal) =====
+// a soft blob of living shadow with two glowing eyes and a long wispy tail. It drifts low over the ground, melts into the earth like spilled ink
+// and slides along underneath as a dark ripple, then rises back up. Grows more wisps, brighter eyes and a ragged crown of smoke with age
+const MURK_STAGES = [
+  { name: "Speck",     scale: 0.45, wisps: 2, tail: 0.9, eyes: 1.5, glow: 0.7, hp: 220, bite: 25, need: 50,  walk: 4.4, run: 8.4,  jump: 7 },
+  { name: "Shade",     scale: 0.62, wisps: 3, tail: 1.1, eyes: 1.25, glow: 0.9, hp: 320, bite: 38, need: 110, walk: 5.2, run: 10,  jump: 8 },
+  { name: "Murkwisp",  scale: 0.82, wisps: 4, tail: 1.3, eyes: 1.05, glow: 1.15, hp: 450, bite: 55, need: 200, walk: 5.8, run: 11.5, jump: 9 },
+  { name: "Elder Murk",scale: 1.05, wisps: 6, tail: 1.5, eyes: 1.0, glow: 1.5, hp: 560, bite: 75, need: 0,   walk: 6.2, run: 12.5, jump: 9.5, crown: true }
+];
+const MURK_NOISE = `
+float mh(vec3 p){ return fract(sin(dot(p, vec3(12.9898,78.233,37.719)))*43758.5453); }
+float mn(vec3 p){ vec3 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);
+  return mix(mix(mix(mh(i),mh(i+vec3(1,0,0)),f.x),mix(mh(i+vec3(0,1,0)),mh(i+vec3(1,1,0)),f.x),f.y),mix(mix(mh(i+vec3(0,0,1)),mh(i+vec3(1,0,1)),f.x),mix(mh(i+vec3(0,1,1)),mh(i+vec3(1,1,1)),f.x),f.y),f.z); }`;
+function buildMurkwisp(stage) {
+  const st = MURK_STAGES[stage], root = new THREE.Group(), body = new THREE.Group(); root.add(body);
+  const U = { t: { value: 0 }, melt: { value: 0 }, glow: { value: st.glow }, rim: { value: new THREE.Color("#8a6bff") }, deep: { value: new THREE.Color("#0b0916") }, mid: { value: new THREE.Color("#1d1636") } };
+  // the shadow body: a soft lumpy teardrop whose surface churns like smoke, dark inside with a violet glow round the edges
+  const bg = new THREE.SphereGeometry(0.5, 48, 32); bg.scale(1.15, 0.92, 0.95);
+  const bodyM = new THREE.ShaderMaterial({ uniforms: U, transparent: true,
+    vertexShader: MURK_NOISE + `uniform float t, melt; varying vec3 vN, vV, vP; void main(){ vec3 p = position; float n = mn(p*3.2 + vec3(0.0, -t*0.9, t*0.4));
+      p += normal * (n - 0.5) * 0.12; p.x -= max(0.0, -p.x) * 0.25 * (0.5 + 0.5*sin(t*1.7 + p.y*6.0));   // a trailing drip at the back
+      p.y = mix(p.y, -0.42 + p.y*0.08, melt); p.xz *= 1.0 + melt*0.9;   // melting: squash flat into a puddle of ink
+      vec4 mv = modelViewMatrix * vec4(p, 1.0); vV = -mv.xyz; vN = normalMatrix * normal; vP = p; gl_Position = projectionMatrix * mv; }`,
+    fragmentShader: MURK_NOISE + `uniform float t, glow, melt; uniform vec3 rim, deep, mid; varying vec3 vN, vV, vP; void main(){ float f = 1.0 - abs(dot(normalize(vN), normalize(vV)));
+      float sw = mn(vP*5.0 + vec3(t*0.6, -t*0.8, 0.0)); vec3 c = mix(deep, mid, sw*0.8) + rim * pow(f, 2.2) * 1.4 * glow + rim * smoothstep(0.72, 0.95, sw) * 0.25 * glow;
+      gl_FragColor = vec4(c, mix(0.96, 0.88, f) * (1.0 - melt*0.15)); }` });
+  const bodyMesh = new THREE.Mesh(bg, bodyM); body.add(bodyMesh);
+  // eyes: two glowing almond slits that blink
+  const eyeM = new THREE.MeshBasicMaterial({ color: new THREE.Color("#c9f7ff") }), eyes = [];
+  [-1, 1].forEach(sd => { const e = new THREE.Mesh(new THREE.SphereGeometry(0.1 * st.eyes, 16, 10), eyeM); e.scale.set(0.5, 1.2, 1.0); e.position.set(0.5, 0.1, sd * 0.2 * Math.sqrt(st.eyes)); e.rotation.y = -sd * 0.5; e.rotation.z = sd * 0.12;
+    const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: murkGlowTex(), color: 0x9fe8ff, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending })); halo.scale.setScalar(0.6 * st.eyes); e.add(halo); body.add(e); eyes.push(e); });
+  // wisps: smoky ribbons streaming off the body (the tail, plus little arm-wisps and an elder's crown)
+  const ribbonM = new THREE.ShaderMaterial({ uniforms: U, transparent: true, depthWrite: false, side: THREE.DoubleSide,
+    vertexShader: `attribute float u; varying float vU; varying vec2 vUv; void main(){ vU = u; vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: MURK_NOISE + `uniform float t, glow; uniform vec3 rim, mid; varying float vU; varying vec2 vUv; void main(){ float edge = 1.0 - abs(vUv.y - 0.5) * 2.0; float n = mn(vec3(vU*6.0 - t*1.6, vUv.y*3.0, t*0.3));
+      float a = edge * (1.0 - vU) * smoothstep(0.0, 0.08, vU + 0.05) * (0.7 + 0.6*n); vec3 c = mix(mid * 1.6, rim * glow, smoothstep(0.2, 1.0, vU) * 0.8 + (1.0-edge)*0.4);
+      gl_FragColor = vec4(c, clamp(a, 0.0, 0.92)); }` });
+  const wisps = [];
+  function addWisp(base, dir, len, width, segs, phase, sway) { const pos = new Float32Array((segs + 1) * 2 * 3), uv = new Float32Array((segs + 1) * 2 * 2), uu = new Float32Array((segs + 1) * 2), idx = [];
+    for (let i = 0; i <= segs; i++) { uv.set([i / segs, 0, i / segs, 1], i * 4); uu.set([i / segs, i / segs], i * 2); if (i < segs) { const a = i * 2; idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); } }
+    const g = new THREE.BufferGeometry(); g.setAttribute("position", new THREE.BufferAttribute(pos, 3)); g.setAttribute("uv", new THREE.BufferAttribute(uv, 2)); g.setAttribute("u", new THREE.BufferAttribute(uu, 1)); g.setIndex(idx);
+    const m = new THREE.Mesh(g, ribbonM); m.frustumCulled = false; body.add(m); wisps.push({ m, base, dir: dir.clone().normalize(), len, width, segs, phase, sway, trail: [] }); }
+  addWisp(new THREE.Vector3(-0.5, 0.0, 0), new THREE.Vector3(-1, 0.15, 0), 1.6 * st.tail, 0.42, 24, 0, 1);   // the long tail
+  addWisp(new THREE.Vector3(-0.45, 0.12, 0.12), new THREE.Vector3(-1, 0.4, 0.4), 0.9 * st.tail, 0.22, 16, 1.3, 1.3);
+  addWisp(new THREE.Vector3(-0.45, 0.12, -0.12), new THREE.Vector3(-1, 0.4, -0.4), 0.9 * st.tail, 0.22, 16, 2.1, 1.3);
+  for (let k = 0; k < st.wisps - 2; k++) { const sd = k % 2 ? 1 : -1; addWisp(new THREE.Vector3(0.1, -0.2, sd * 0.38), new THREE.Vector3(0.3, -0.5, sd), 0.45 + k * 0.05, 0.14, 10, 3 + k, 2); }   // little arm-wisps
+  if (st.crown) for (let k = 0; k < 5; k++) { const a = (k - 2) * 0.32; addWisp(new THREE.Vector3(0.05, 0.4, a * 0.6), new THREE.Vector3(-0.4, 1, a), 0.55 + (2 - Math.abs(k - 2)) * 0.12, 0.13, 10, 5 + k, 1.6); }   // elder: a ragged crown of smoke
+  // ink puddle + ripple ring (for melting into the ground and sliding under it)
+  const ink = new THREE.Mesh(new THREE.CircleGeometry(0.75, 40), new THREE.MeshBasicMaterial({ color: 0x07060d, transparent: true, opacity: 0, depthWrite: false })); ink.rotation.x = -Math.PI / 2; ink.position.y = 0.012; root.add(ink);
+  const ringM = new THREE.MeshBasicMaterial({ color: 0x8a6bff, transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending });
+  const rings = [0, 1, 2].map(i => { const r = new THREE.Mesh(new THREE.RingGeometry(0.6, 0.68, 48), ringM.clone()); r.rotation.x = -Math.PI / 2; r.position.y = 0.015; root.add(r); return r; });
+  // attack: a glowing crescent slash of shadow claws in front of it
+  const slashM = new THREE.MeshBasicMaterial({ color: 0xb59bff, transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide });
+  const slashes = [0.62, 0.78, 0.94].map((r, i) => { const m = new THREE.Mesh(new THREE.TorusGeometry(r, 0.03, 6, 40, Math.PI * 0.55), slashM); m.position.set(0.95, -0.15, 0); m.rotation.set(0, Math.PI / 2, 0.55); body.add(m); return m; });   // three curved claw marks in the air
+  // drifting motes of shadow
+  const NM = 26, mg = new THREE.BufferGeometry(), mp = new Float32Array(NM * 3), seeds = []; for (let i = 0; i < NM; i++) seeds.push([Math.random(), Math.random(), Math.random()]);
+  mg.setAttribute("position", new THREE.BufferAttribute(mp, 3)); const motes = new THREE.Points(mg, new THREE.PointsMaterial({ color: 0x6f58d8, size: 0.06, transparent: true, opacity: 0.7, depthWrite: false })); root.add(motes);
+  const api = { root, stage, under: 0, moving: 0, melt: 0, eyesM: eyeM, _blink: 2, sleep: 0, sleepK: 0, attack: 0, atkT: 9 };   // sleep 0/1; attack: set to 1 to lash out once
+  const tmp = new THREE.Vector3(), side = new THREE.Vector3();
+  api.update = function (t, dt, moveAmt, under) {   // under: 0 = above ground, 1 = melted into the ground
+    U.t.value = t; api.melt += ((under ? 1 : 0) - api.melt) * Math.min(1, dt * 4); const mk = api.melt; U.melt.value = Math.min(1, mk * 1.4);
+    api.moving += (moveAmt - api.moving) * Math.min(1, dt * 5);
+    api.sleepK += ((api.sleep ? 1 : 0) - api.sleepK) * Math.min(1, dt * 2); const sk = api.sleepK * (1 - mk);
+    if (api.attack) { api.attack = 0; api.atkT = 0; } api.atkT += dt; const ap = api.atkT < 0.6 ? Math.sin(api.atkT / 0.6 * Math.PI) : 0, lunge = ap * ap;   // attack: a quick lunge, eyes flare, the arm-wisps lash forward like claws
+    const breathe = Math.sin(t * 1.1) * 0.03 * sk;
+    const hover = 0.62 + Math.sin(t * 1.8) * 0.06 * (1 - sk); body.position.y = (hover * (1 - sk) + 0.4 * sk) * (1 - mk) + 0.05 * mk; body.position.x = lunge * 0.8; body.rotation.z = -api.moving * 0.18 + Math.sin(t * 1.3) * 0.04 * (1 - sk) - lunge * 0.3;
+    body.scale.set((1 + api.moving * 0.12) * (1 + 0.12 * sk) + lunge * 0.15, (1 - api.moving * 0.05) * (1 - 0.18 * sk + breathe) - lunge * 0.08, 1 + 0.1 * sk);   // asleep: settles onto the ground as a soft mound, breathing slowly
+    eyes.forEach(e => { e.visible = mk < 0.85 || Math.sin(t * 2.3) > 0.2; e.position.y = 0.1 + (mk > 0.6 ? 0.25 * mk : 0); });   // under ground just the eyes peek out now and then
+    api._blink -= dt; const bl = api._blink < 0.12 ? 0.15 : 1; if (api._blink < 0) api._blink = 2 + Math.random() * 3; eyes.forEach(e => { e.scale.y = 1.15 * bl * (1 - 0.9 * sk) * (1 + lunge * 0.25); e.scale.x = 0.5 * (1 + lunge * 0.4); e.children[0].material.opacity = (1 - 0.85 * sk) * (1 + lunge); }); eyeM.color.setRGB(0.79 + lunge * 0.21, 0.97 - lunge * 0.3, 1 - lunge * 0.2);   // asleep: eyes shut to thin glowing slits
+    wisps.forEach((w, wi) => { const p = w.m.geometry.attributes.position, arm = w.base.y < -0.1, L = w.len * (1 - mk * 0.8) * (1 + api.moving * 0.3) * (wi === 0 ? 1 : 1 - 0.5 * sk) * (arm ? 1 + lunge * 1.6 : 1);
+      for (let i = 0; i <= w.segs; i++) { const u = i / w.segs, wv = Math.sin(t * 2.4 * w.sway - u * 5 + w.phase) * 0.18 * u * (1 + api.moving), up = Math.sin(t * 1.6 - u * 3 + w.phase * 2) * 0.1 * u;
+        tmp.copy(w.base).addScaledVector(w.dir, u * L); if (arm && lunge > 0.01) { tmp.x += u * L * lunge * 1.2; tmp.y += u * lunge * 0.35; } /* claws reach forward */ tmp.y += up - api.moving * u * u * 0.25 * (w.dir.y > 0.8 ? -1 : 1); tmp.z += wv; const wd = w.width * (1 - u * 0.75) * (1 - mk * 0.5);
+        side.set(0, 1, 0); if (Math.abs(w.dir.y) > 0.7) side.set(0, 0, 1);
+        if (wi === 0 && sk > 0.01) { const ang = Math.PI + u * 4.4, r = 0.62 + u * 0.12; tmp.x += (Math.cos(ang) * r - tmp.x) * sk; tmp.z += (Math.sin(ang) * r - tmp.z) * sk; tmp.y += (-0.3 + body.position.y * 0 + Math.sin(t * 0.8 - u * 3) * 0.02 - tmp.y) * sk; side.set(0, 1 - sk * 0.6, 0).normalize(); }   // asleep: the long tail curls round its body like a scarf
+        p.setXYZ(i * 2, tmp.x - side.x * wd / 2, tmp.y - side.y * wd / 2, tmp.z - side.z * wd / 2); p.setXYZ(i * 2 + 1, tmp.x + side.x * wd / 2, tmp.y + side.y * wd / 2, tmp.z + side.z * wd / 2); }
+      p.needsUpdate = true; });
+    slashM.opacity = api.atkT > 0.12 && api.atkT < 0.5 ? Math.sin((api.atkT - 0.12) / 0.38 * Math.PI) * 0.9 : 0; slashes.forEach(m => { m.rotation.z = 0.55 - (api.atkT - 0.12) * 2.2; });
+    ink.material.opacity = 0.25 + mk * 0.6; ink.scale.setScalar(0.7 + mk * 0.6 + api.moving * 0.2);
+    rings.forEach((r, i) => { const ph = ((t * 0.9 + i / 3) % 1); r.scale.setScalar(0.6 + ph * 1.4); r.material.opacity = mk * (1 - ph) * 0.55 * (0.6 + api.moving); });
+    for (let i = 0; i < NM; i++) { const [a, b, c] = seeds[i], life = (t * (0.25 + a * 0.3) + b) % 1; mp[i * 3] = -0.3 - life * 0.9 * (0.5 + api.moving) + Math.sin(t + c * 9) * 0.1; mp[i * 3 + 1] = body.position.y + (c - 0.5) * 0.5 + life * 0.5; mp[i * 3 + 2] = (a - 0.5) * 0.7; }
+    mg.attributes.position.needsUpdate = true; motes.material.opacity = 0.7 * (1 - mk);
+  };
+  root.scale.setScalar(st.scale);
+  return api;
+}
+let _murkTex = null;
+function murkGlowTex() { if (_murkTex) return _murkTex; const c = document.createElement("canvas"); c.width = c.height = 64; const x = c.getContext("2d"), g = x.createRadialGradient(32, 32, 0, 32, 32, 32); g.addColorStop(0, "rgba(255,255,255,1)"); g.addColorStop(0.3, "rgba(255,255,255,.4)"); g.addColorStop(1, "rgba(255,255,255,0)"); x.fillStyle = g; x.fillRect(0, 0, 64, 64); return (_murkTex = new THREE.CanvasTexture(c)); }
+
+const R = new THREE.WebGLRenderer({antialias:true}); R.setPixelRatio(Math.min(2,devicePixelRatio)); document.getElementById('view').appendChild(R.domElement); R.outputEncoding = THREE.sRGBEncoding;
+const S = new THREE.Scene(); S.background = new THREE.Color(0x121022); S.fog = new THREE.Fog(0x121022, 14, 34);
+S.add(new THREE.HemisphereLight(0xbfc8ff,0x202018,0.7)); const dl=new THREE.DirectionalLight(0xdfe6ff,0.8); dl.position.set(3,6,4); S.add(dl);
+const gr=new THREE.Mesh(new THREE.CircleGeometry(16,64), new THREE.MeshStandardMaterial({color:0x1c2a20, roughness:1})); gr.rotation.x=-Math.PI/2; S.add(gr);
+for(let i=0;i<300;i++){ const b=new THREE.Mesh(new THREE.ConeGeometry(0.02,0.3+Math.random()*0.3,3), new THREE.MeshStandardMaterial({color:0x4d7a58})); const a=Math.random()*6.28, r=1.5+Math.random()*9; b.position.set(Math.cos(a)*r,0.15,Math.sin(a)*r); S.add(b); }
+const C = new THREE.PerspectiveCamera(35,1,0.1,100);
+let mode=window.MODE||'idle', stage=2, ms=[], yaw=0.9, pitch=0.25, dist=6, t=0, drag=null, compare=false, slideX=0;
+function build(){ ms.forEach(m=>S.remove(m.root)); ms=[]; const list=compare?[0,1,2,3]:[stage];
+  list.forEach((s,i)=>{ const a=buildMurkwisp(s); a.baseX = compare?(i-1.5)*2.4:0; a.root.position.x=a.baseX; S.add(a.root); ms.push(a); });
+  dist = compare?11:2.6+5*MURK_STAGES[stage].scale; document.querySelectorAll('[data-st]').forEach(b=>b.classList.toggle('on',!compare&&+b.dataset.st===stage)); document.getElementById('cmp').classList.toggle('on',compare); stats(); }
+function stats(){ const st=MURK_STAGES[compare?2:stage], sz=['Tiny','Small','Medium','Large'][compare?2:stage]; document.getElementById('stats').innerHTML=[[st.hp,'health'],[st.bite,'bite'],[st.run,'speed'],[sz,'size'],['-20%','damage at night']].map(([v,l])=>'<div><b>'+v+'</b>'+l+'</div>').join(''); }
+function size(){ const w=innerWidth,h=innerHeight; R.setSize(w,h); C.aspect=w/h; C.setViewOffset(w,h,0,h*0.16,w,h); C.updateProjectionMatrix(); } /* the creature sits a bit higher on screen, above the panel */ addEventListener('resize',size); size();
+const el=R.domElement; el.addEventListener('pointerdown',e=>{drag=[e.clientX,e.clientY]; el.setPointerCapture(e.pointerId);}); el.addEventListener('pointerup',()=>drag=null);
+el.addEventListener('pointermove',e=>{ if(!drag) return; yaw-=(e.clientX-drag[0])*0.008; pitch=Math.max(-0.05,Math.min(1.2,pitch+(e.clientY-drag[1])*0.006)); drag=[e.clientX,e.clientY]; });
+el.addEventListener('wheel',e=>{ dist=Math.max(1.5,Math.min(18,dist*(1+e.deltaY*0.001))); e.preventDefault(); },{passive:false});
+document.querySelectorAll('[data-st]').forEach(b=>b.onclick=()=>{ stage=+b.dataset.st; compare=false; build(); });
+document.getElementById('cmp').onclick=()=>{ compare=!compare; build(); };
+document.querySelectorAll('[data-m]').forEach(b=>b.onclick=()=>{ mode=b.dataset.m; slideX=0; document.querySelectorAll('[data-m]').forEach(x=>x.classList.toggle('on',x===b)); });
+let last=performance.now();
+function loop(now){ requestAnimationFrame(loop); const dt=window.__freeze?0:Math.min(0.05,(now-last)/1000); last=now; t+=dt;
+  if(mode==='slide') slideX = ((t*1.2)%6)-3;
+  ms.forEach(a=>{ a.sleep = mode==='sleep'?1:0; if(mode==='attack' && a.atkT>1.3) a.attack=1; a.update(t,dt, mode==='move'||mode==='slide'?1:0, mode==='melt'||mode==='slide'); a.root.position.x = a.baseX + (mode==='slide'&&!compare?slideX*a.root.scale.x*1.4:0); });
+  const cy=compare?0.5:0.55*MURK_STAGES[stage].scale; C.position.set(Math.sin(yaw)*Math.cos(pitch)*dist, cy+Math.sin(pitch)*dist, Math.cos(yaw)*Math.cos(pitch)*dist); C.lookAt(0,cy,0); R.render(S,C); }
+build(); requestAnimationFrame(loop); window.DONE=1; window.__mw={ms:()=>ms};
+})();</script></body></html>
