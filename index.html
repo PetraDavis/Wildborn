@@ -10558,6 +10558,361 @@ const N7_STAGES = { lumil: [{ name: "Glimmerkit", scale: 0.45, need: 50, walk: 1
 const n7night = () => { try { return night.k > 0.5; } catch (e) { return false; } };
 const buildLumilPlayer = () => ncPlayer("lumil", () => { const m = N7.buildLanternBat(SEX_NOW); m.traverse(q => { const p = q.geometry && q.geometry.parameters; if (q.isMesh && p && p.radiusTop === 0.03 && p.height === 1.0) q.frustumCulled = false; }); return m; },   /* the sleeping branch prop must not count toward the bat's size */ { size: "Tiny", ground: true, headAt: new THREE.Vector3(0.4, 0.4, 0), mode: s => s.sleep ? "sleep" : s.flap ? "fly" : s.still > 3 && n7night() ? "lure" : "idle" });
 
+/* Petra 2026-11-21: Yxae (the petal fawn), a large carnivore whose face opens into a flower jaw; legs are forward-kinematics as approved */
+const N8 = (function () {
+/* shared kit for the five new creatures: tubes, fur shells, glass, glow, ribbons, legs. All creatures face +x. */
+const V = THREE.Vector3, lin = h => new THREE.Color(h).convertSRGBToLinear();
+function mk(g, m) { const o = new THREE.Mesh(g, m); o.castShadow = true; o.receiveShadow = true; return o; }
+function cnv(w, h) { const c = document.createElement("canvas"); c.width = w; c.height = h; return c; }
+function rng(s) { return () => { s = (s * 16807) % 2147483647; return (s - 1) / 2147483646; }; }
+const spl = (arr, n) => new THREE.CatmullRomCurve3(arr.map(a => new V(a[0], a[1], a[2]))).getPoints(n);
+/* a tube along points with a radius per point; ry squashes it up/down, colFn(t, ang) gives a vertex colour (ang 0 = top) */
+function tubeGeo(pts, rad, o = {}) { if (o.cap) { const n0 = pts.length, K = 5, a0 = o.cap === "end" ? null : pts[0], P2 = pts.slice(), R2 = rad.slice();
+    const add = (atStart) => { const i0 = atStart ? 0 : n0 - 1, i1 = atStart ? 1 : n0 - 2, d = new V().subVectors(pts[i0], pts[i1]).normalize(), r = rad[i0], ex = [], er = [];
+      for (let k = 1; k <= K; k++) { const th = k / K * Math.PI / 2; ex.push(pts[i0].clone().addScaledVector(d, Math.sin(th) * r * 0.9)); er.push(Math.max(1e-4, Math.cos(th) * r)); }
+      if (atStart) { P2.unshift(...ex.reverse()); R2.unshift(...er.reverse()); } else { P2.push(...ex); R2.push(...er); } };
+    if (o.cap !== "end") add(true); if (o.cap !== "start") add(false); pts = P2; rad = R2; }
+  const sg = o.sg || 16, n = pts.length, pos = [], uv = [], cols = [], idx = [], ry = o.ry || (() => 1), rz = o.rz || (() => 1);
+  let L = 0; const ls = [0]; for (let i = 1; i < n; i++) { L += pts[i].distanceTo(pts[i - 1]); ls.push(L); }
+  for (let i = 0; i < n; i++) { const p = pts[i], t = new V().subVectors(pts[Math.min(n - 1, i + 1)], pts[Math.max(0, i - 1)]).normalize();
+    let up = new V(0, 1, 0); if (Math.abs(t.dot(up)) > 0.95) up = new V(-1, 0, 0); const side = new V().crossVectors(t, up).normalize(), u2 = new V().crossVectors(side, t).normalize(), f = i / (n - 1);
+    for (let j = 0; j <= sg; j++) { const a = j / sg * Math.PI * 2, r = rad[i], sq = o.sq || 1, ca = Math.cos(a), sa = Math.sin(a), cc = Math.sign(ca) * Math.pow(Math.abs(ca), sq), ss = Math.sign(sa) * Math.pow(Math.abs(sa), sq); const q = p.clone().addScaledVector(u2, cc * r * ry(f, a)).addScaledVector(side, ss * r * rz(f, a));
+      pos.push(q.x, q.y, q.z); uv.push(ls[i] / Math.max(L, 1e-4), j / sg); if (o.colFn) { const c = o.colFn(f, a); cols.push(c.r, c.g, c.b); } } }
+  for (let i = 0; i < n - 1; i++) for (let j = 0; j < sg; j++) { const a = i * (sg + 1) + j, b = a + sg + 1; idx.push(a, a + 1, b, b, a + 1, b + 1); }
+  const g = new THREE.BufferGeometry(); g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2)); if (o.colFn) g.setAttribute("color", new THREE.Float32BufferAttribute(cols, 3)); g.setIndex(idx); g.computeVertexNormals();
+  if (o.cap) { /* close both ends with a soft dome so no holes show */ }
+  return g; }
+/* a soft ellipsoid blob (head, chest) with vertex colours */
+function blobGeo(rx, ry, rz, colFn, seg = 24, noise = 0) { const g = new THREE.SphereGeometry(1, seg, Math.round(seg * 0.7)), P = g.attributes.position, cols = [];
+  for (let i = 0; i < P.count; i++) { let x = P.getX(i), y = P.getY(i), z = P.getZ(i); const k = 1 + noise * Math.sin(x * 7 + z * 5) * Math.cos(y * 6); P.setXYZ(i, x * rx * k, y * ry * k, z * rz * k); if (colFn) { const c = colFn(x, y, z); cols.push(c.r, c.g, c.b); } }
+  if (colFn) g.setAttribute("color", new THREE.Float32BufferAttribute(cols, 3)); g.computeVertexNormals(); return g; }
+/* fur: a noise texture of strands, and shells pushed out along the normals that keep only the strands */
+const FUR_TEX = (() => { const c = cnv(256, 256), g = c.getContext("2d"), R = rng(11), im = g.createImageData(256, 256);
+  for (let i = 0; i < 256 * 256; i++) { const v = (0.25 + 0.75 * Math.pow(R(), 1.3)) * 255; im.data[i * 4] = im.data[i * 4 + 1] = im.data[i * 4 + 2] = v; im.data[i * 4 + 3] = 255; } g.putImageData(im, 0, 0);
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.magFilter = THREE.NearestFilter; t.minFilter = THREE.NearestFilter; t.generateMipmaps = false; return t; })();
+let FUR_SCALE = 0.01;
+function furMat(o) { const m = new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, roughness: 0.9, side: THREE.FrontSide });
+  const U = { uK: { value: o.k }, uLen: { value: o.len }, uRep: { value: new THREE.Vector2(o.rep[0] * FUR_SCALE, o.rep[1] * FUR_SCALE) }, uNoise: { value: FUR_TEX }, uGrav: { value: new THREE.Vector3(0, -1, 0) }, uTip: { value: lin(o.tip || "#ffffff") }, uTipK: { value: o.tipK ?? 0.25 }, uWind: { value: 0 } };
+  m.userData.U = U;
+  m.onBeforeCompile = sh => { Object.assign(sh.uniforms, U);
+    sh.vertexShader = "uniform float uK, uLen, uWind; uniform vec3 uGrav; varying vec2 vFU;\n" + sh.vertexShader.replace("#include <begin_vertex>", "#include <begin_vertex>\n vFU = uv; transformed += normal * uK * uLen + uGrav * uK * uK * uLen * 0.45 + vec3(sin(uWind + position.x * 3.0) , 0.0, cos(uWind * 0.8 + position.z * 3.0)) * uK * uK * uLen * 0.12;");
+    sh.fragmentShader = "uniform float uK, uTipK; uniform vec2 uRep; uniform sampler2D uNoise; uniform vec3 uTip; varying vec2 vFU;\n" + sh.fragmentShader.replace("#include <color_fragment>", "#include <color_fragment>\n float fn = texture2D(uNoise, vFU * uRep).r; if (uK > 0.01 && fn < uK * 0.92 + 0.04) discard; diffuseColor.rgb *= mix(0.55, 1.05, uK); diffuseColor.rgb = mix(diffuseColor.rgb, uTip, uK * uK * uTipK);"); };
+  m.customProgramCacheKey = () => "fur1"; return m; }
+/* geometry -> base mesh plus fur shells, all in one group */
+function furCoat(geo, o) { const g = new THREE.Group(), L = o.layers || 12; for (let i = 0; i <= L; i++) { const m = mk(geo, furMat({ k: i / L, len: o.len, rep: o.rep || [40, 40], tip: o.tip, tipK: o.tipK })); if (i > 0) m.castShadow = false; g.add(m); } g.userData.wind = t => g.children.forEach(m => { m.material.userData.U.uWind.value = t; }); return g; }
+function glassMat(c, op = 0.35, em = 0.25) { return new THREE.MeshPhysicalMaterial({ color: lin(c), emissive: lin(c), emissiveIntensity: em, roughness: 0.08, metalness: 0, clearcoat: 1, clearcoatRoughness: 0.1, transparent: true, opacity: op, side: THREE.DoubleSide, depthWrite: false }); }
+function glowMat(c, k = 1.6) { return new THREE.MeshStandardMaterial({ color: lin(c), emissive: lin(c), emissiveIntensity: k, roughness: 0.4 }); }
+function haloSprite(c, s, op = 0.6) { const cv = cnv(64, 64), g = cv.getContext("2d"), gr = g.createRadialGradient(32, 32, 0, 32, 32, 32); gr.addColorStop(0, "rgba(255,255,255,1)"); gr.addColorStop(0.35, "rgba(255,255,255,0.45)"); gr.addColorStop(1, "rgba(255,255,255,0)"); g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: (() => { const q = new THREE.CanvasTexture(cv); q.encoding = THREE.sRGBEncoding; return q; })(), color: lin(c), transparent: true, opacity: op, blending: THREE.AdditiveBlending, depthWrite: false })); sp.scale.setScalar(s); return sp; }
+/* a ribbon strip that follows a moving path (manes, streamers, fins): set(pts, widths, sideVec) each frame */
+function liveRibbon(n, mat) { const g = new THREE.BufferGeometry(), pos = new Float32Array(n * 2 * 3), uv = [], idx = [];
+  for (let i = 0; i < n; i++) { uv.push(i / (n - 1), 0, i / (n - 1), 1); if (i < n - 1) { const a = i * 2; idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); } }
+  g.setAttribute("position", new THREE.BufferAttribute(pos, 3)); g.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2)); g.setIndex(idx); const m = new THREE.Mesh(g, mat); m.frustumCulled = false;
+  m.set = (pts, w, side) => { for (let i = 0; i < n; i++) { const p = pts[i], s = side[i] || side, k = i * 6; pos[k] = p.x - s.x * w[i] * 0.5; pos[k + 1] = p.y - s.y * w[i] * 0.5; pos[k + 2] = p.z - s.z * w[i] * 0.5; pos[k + 3] = p.x + s.x * w[i] * 0.5; pos[k + 4] = p.y + s.y * w[i] * 0.5; pos[k + 5] = p.z + s.z * w[i] * 0.5; }
+    g.attributes.position.needsUpdate = true; g.computeVertexNormals(); g.computeBoundingSphere(); };
+  return m; }
+/* a gradient ribbon texture: fades along its length, glowing edge */
+function ribbonTex(c1, c2, edge) { const c = cnv(256, 64), g = c.getContext("2d"), gr = g.createLinearGradient(0, 0, 256, 0); gr.addColorStop(0, c1); gr.addColorStop(1, c2); g.fillStyle = gr; g.fillRect(0, 0, 256, 64);
+  if (edge) { const e = g.createLinearGradient(0, 0, 0, 64); e.addColorStop(0, edge); e.addColorStop(0.18, "rgba(0,0,0,0)"); e.addColorStop(0.82, "rgba(0,0,0,0)"); e.addColorStop(1, edge); g.fillStyle = e; g.globalCompositeOperation = "lighter"; g.fillRect(0, 0, 256, 64); }
+  for (let i = 0; i < 40; i++) { g.globalCompositeOperation = "source-over"; g.strokeStyle = "rgba(255,255,255,0.12)"; g.lineWidth = 1; g.beginPath(); const y = 4 + i * 1.4; g.moveTo(0, y); g.bezierCurveTo(80, y + 6, 170, y - 6, 256, y); g.stroke(); }
+  const t = new THREE.CanvasTexture(c); t.encoding = THREE.sRGBEncoding; return t; }
+/* a leg as a chain of pivots, each with a tapered tube going down -y. lens/rads per segment. returns pivots */
+function legChain(parent, lens, rads, mat, o = {}) { const piv = []; let p = parent;
+  lens.forEach((L, i) => { const q = new THREE.Group(); if (i > 0) q.position.y = -lens[i - 1]; p.add(q); piv.push(q);
+    const r0 = rads[i], r1 = rads[i + 1] ?? rads[i] * 0.8, pts = [new V(0, 0, 0), new V(0, -L * 0.5, 0), new V(0, -L, 0)];
+    const g = tubeGeo(pts, [r0, (r0 + r1) / 2 * (o.bulge ? 1.12 : 1), r1], { sg: 12, cap: true, colFn: o.colFn ? (f, a) => o.colFn((i + f) / lens.length, a) : null }); const m = o.fur ? furCoat(g, o.fur) : mk(g, mat); q.add(m);
+    if (i > 0 && !o.fur) { const j = mk(new THREE.SphereGeometry(r0 * 1.0, 12, 8), o.jointMat || mat); q.add(j); } p = q; });
+  return piv; }
+const ease = (a, b, k) => a + (b - a) * k;
+/* fish scales: overlapping rounded scales as a colour + bump texture, tinted by vertex colours */
+const SCALE_CV = (() => { const c = cnv(128, 128), g = c.getContext("2d"); g.fillStyle = "#9a9a9a"; g.fillRect(0, 0, 128, 128);
+  for (let row = 3; row >= -1; row--) for (let col = -1; col <= 2; col++) { const x = col * 64 + (row % 2 ? 32 : 0) + 32, y = row * 32 + 8;
+    const gr = g.createRadialGradient(x, y - 10, 2, x, y, 36); gr.addColorStop(0, "#ffffff"); gr.addColorStop(0.6, "#d8d8d8"); gr.addColorStop(1, "#8a8a8a"); g.fillStyle = gr;
+    g.beginPath(); g.arc(x, y, 34, 0, Math.PI); g.lineTo(x - 34, y - 6); g.lineTo(x + 34, y - 6); g.closePath(); g.fill(); g.strokeStyle = "rgba(60,60,60,0.55)"; g.lineWidth = 2.5; g.beginPath(); g.arc(x, y, 34, 0.15, Math.PI - 0.15); g.stroke(); }
+  return c; })();
+function scaleMat(rep, o = {}) { const t = new THREE.CanvasTexture(SCALE_CV); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(rep[0], rep[1]); t.anisotropy = 4; t.encoding = THREE.sRGBEncoding;
+  const b = new THREE.CanvasTexture(SCALE_CV); b.wrapS = b.wrapT = THREE.RepeatWrapping; b.repeat.set(rep[0], rep[1]);
+  return new THREE.MeshPhysicalMaterial({ color: 0xffffff, vertexColors: true, map: t, bumpMap: b, bumpScale: o.bump ?? 0.006, roughness: 0.32, metalness: 0.05, clearcoat: 0.7, clearcoatRoughness: 0.25, sheen: lin(o.sheen || "#9ff0ff"), emissive: lin(o.glow || "#103a4a"), emissiveIntensity: 0.25 }); }
+
+/* helpers for the three new creatures (Uiroi, Bilcav, Vaygiu) */
+function profF(P) { return s => { if (s <= P[0][0]) return P[0][1]; for (let k = 1; k < P.length; k++) if (s <= P[k][0]) { const a = P[k - 1], b = P[k], u = (s - a[0]) / (b[0] - a[0]), q = u * u * (3 - 2 * u); return a[1] + (b[1] - a[1]) * q; } return P[P.length - 1][1]; }; }
+const sstep = (a, b, x) => { const u = Math.max(0, Math.min(1, (x - a) / (b - a))); return u * u * (3 - 2 * u); };
+function texOf(c, rep) { const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; if (rep) t.repeat.set(rep[0], rep[1]); t.anisotropy = 4; return t; }
+function srgb(t) { t.encoding = THREE.sRGBEncoding; return t; }
+/* swap a mesh's geometry in place (for meshes rebuilt every frame) */
+function regeo(m, g) { if (m.geometry) m.geometry.dispose(); m.geometry = g; }
+/* a group oriented so local +x = dir, +y ~ up */
+function orient(o, dir, up = new V(0, 1, 0)) { const x = dir.clone().normalize(), z = new V().crossVectors(x, up).normalize(), y = new V().crossVectors(z, x); o.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z)); }
+/* four-pointed star (sparkle) shape with curved sides */
+function star4(R, k = 0.16) { const s = new THREE.Shape(); for (let i = 0; i < 4; i++) { const a = i * Math.PI / 2, b = a + Math.PI / 2, m = a + Math.PI / 4; if (!i) s.moveTo(Math.cos(a) * R, Math.sin(a) * R); s.quadraticCurveTo(Math.cos(m) * R * k, Math.sin(m) * R * k, Math.cos(b) * R, Math.sin(b) * R); } return s; }
+/* 2-bone IK: hip H, foot F, lengths a b, bend hint w -> knee */
+function ik(H, F, a, b, hint) { const d0 = H.distanceTo(F), d = Math.min(d0, (a + b) * 0.999), u = new V().subVectors(F, H).normalize(); const x = (a * a - b * b + d * d) / (2 * d), h = Math.sqrt(Math.max(0, a * a - x * x)); const w = hint.clone().addScaledVector(u, -hint.dot(u)).normalize(); return H.clone().addScaledVector(u, x).addScaledVector(w, h); }
+/* sample a polyline H->K->F into n points per bone */
+function bonePts(list, n) { const out = []; for (let i = 0; i < list.length - 1; i++) for (let k = 0; k < n; k++) out.push(list[i].clone().lerp(list[i + 1], k / n)); out.push(list[list.length - 1].clone()); return out; }
+/* tube with parallel-transport frames: no sudden twist when the path turns vertical (legs, necks) */
+function tubePT(pts, rad, o = {}) { if (o.cap) { const n0 = pts.length, K = 5, P2 = pts.slice(), R2 = rad.slice();
+    const add = st => { const i0 = st ? 0 : n0 - 1, i1 = st ? 1 : n0 - 2, d = new V().subVectors(pts[i0], pts[i1]).normalize(), r = rad[i0], ex = [], er = []; for (let k = 1; k <= K; k++) { const th = k / K * Math.PI / 2; ex.push(pts[i0].clone().addScaledVector(d, Math.sin(th) * r * 0.9)); er.push(Math.max(1e-4, Math.cos(th) * r)); } if (st) { P2.unshift(...ex.reverse()); R2.unshift(...er.reverse()); } else { P2.push(...ex); R2.push(...er); } };
+    add(true); add(false); pts = P2; rad = R2; }
+  const capOff = o.cap ? 5 : 0; let UA = null; if (o.uArr) { UA = o.uArr.slice(); if (o.cap) { for (let k = 0; k < 5; k++) { UA.unshift(o.uArr[0]); UA.push(o.uArr[o.uArr.length - 1]); } } }
+  const sg = o.sg || 16, n = pts.length, pos = [], uv = [], cols = [], idx = [], ry = o.ry || (() => 1), rz = o.rz || (() => 1);
+  let L = 0; const ls = [0]; for (let i = 1; i < n; i++) { L += pts[i].distanceTo(pts[i - 1]); ls.push(L); } if (o.uAnchor) { const d = o.uAnchor[1] - ls[o.uAnchor[0] + capOff]; o = Object.assign({}, o, { u0: (o.u0 || 0) + d }); }
+  const T = pts.map((p, i) => new V().subVectors(pts[Math.min(n - 1, i + 1)], pts[Math.max(0, i - 1)]).normalize());
+  let up = new V(0, 1, 0); if (Math.abs(T[0].dot(up)) > 0.9) up = new V(1, 0, 0); up.addScaledVector(T[0], -up.dot(T[0])).normalize();
+  for (let i = 0; i < n; i++) { if (i > 0) { const ax = new V().crossVectors(T[i - 1], T[i]), s = ax.length(); if (s > 1e-6) up.applyAxisAngle(ax.normalize(), Math.asin(Math.min(1, s)) * (T[i - 1].dot(T[i]) < 0 ? -1 : 1)); up.addScaledVector(T[i], -up.dot(T[i])).normalize(); }
+    if (o.sideRef) { const sr = o.sideRef.clone().addScaledVector(T[i], -o.sideRef.dot(T[i])).normalize(); up = new V().crossVectors(sr, T[i]).normalize(); }
+    const side = new V().crossVectors(T[i], up).normalize(), f = i / (n - 1);
+    for (let j = 0; j <= sg; j++) { const a = j / sg * Math.PI * 2, r = rad[i]; const q = pts[i].clone().addScaledVector(up, Math.cos(a) * r * ry(f, a)).addScaledVector(side, Math.sin(a) * r * rz(f, a)); pos.push(q.x, q.y, q.z); uv.push(UA ? UA[i] : o.uAbs ? ls[i] + (o.u0 || 0) : ls[i] / Math.max(L, 1e-4), j / sg); if (o.colFn) { const c = o.colFn(f, a, UA ? UA[i] : ls[i] + (o.u0 || 0)); cols.push(c.r, c.g, c.b); } } }
+  for (let i = 0; i < n - 1; i++) for (let j = 0; j < sg; j++) { const a = i * (sg + 1) + j, b = a + sg + 1; idx.push(a, a + 1, b, b, a + 1, b + 1); }
+  const g = new THREE.BufferGeometry(); g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2)); if (o.colFn) g.setAttribute("color", new THREE.Float32BufferAttribute(cols, 3)); g.setIndex(idx); g.computeVertexNormals(); return g; }
+
+/* fur shells sharing one geometry that can be swapped each frame; optional spot texture (glowing pattern) */
+function furMat2(o) { const m = new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, roughness: 0.95 });
+  const U = { uK: { value: o.k }, uLen: { value: o.len }, uRep: { value: new THREE.Vector2(o.rep[0], o.rep[1]) }, uNoise: { value: FUR_TEX }, uSpot: { value: o.spot || BLACK_TEX }, uSpotCol: { value: lin(o.spotCol || "#ffffff") }, uGlow: { value: o.glow || 0 }, uSpotS: { value: o.spotS || 1 } };
+  m.userData.U = U;
+  m.onBeforeCompile = sh => { Object.assign(sh.uniforms, U);
+    sh.vertexShader = "uniform float uK, uLen; varying vec2 vFU;\n" + sh.vertexShader.replace("#include <begin_vertex>", "#include <begin_vertex>\n vFU = uv; transformed += normal * uK * uLen + vec3(0.0, -1.0, 0.0) * uK * uK * uLen * 0.3;");
+    sh.fragmentShader = "uniform float uK, uGlow, uSpotS; uniform vec2 uRep; uniform sampler2D uNoise; uniform sampler2D uSpot; uniform vec3 uSpotCol; varying vec2 vFU;\n" + sh.fragmentShader.replace("#include <color_fragment>", "#include <color_fragment>\n float fn = texture2D(uNoise, vFU * uRep).r; if (uK > 0.01 && fn < uK * 0.9 + 0.05) discard; float sp = texture2D(uSpot, vec2(vFU.x * uSpotS, vFU.y)).r; diffuseColor.rgb = mix(diffuseColor.rgb, uSpotCol, sp * 0.8); diffuseColor.rgb *= mix(0.6, 1.08, uK);").replace("#include <emissivemap_fragment>", "#include <emissivemap_fragment>\n totalEmissiveRadiance += uSpotCol * sp * uGlow;"); };
+  m.customProgramCacheKey = () => "fur2"; return m; }
+const BLACK_TEX = (() => { const c = cnv(4, 4), g = c.getContext("2d"); g.fillStyle = "#000"; g.fillRect(0, 0, 4, 4); return new THREE.CanvasTexture(c); })();
+function furShells(o) { const g = new THREE.Group(), L = o.layers || 12, ms = []; let geo = o.geo || new THREE.BufferGeometry();
+  for (let i = 0; i <= L; i++) { const m = new THREE.Mesh(geo, furMat2(Object.assign({}, o, { k: i / L }))); m.castShadow = i === 0; m.receiveShadow = true; m.frustumCulled = false; g.add(m); ms.push(m); }
+  g.userData.set = ng => { if (geo && geo !== ng) geo.dispose(); geo = ng; ms.forEach(m => m.geometry = ng); }; return g; }
+
+/* real ears (o.fox = fox ear: wide base, straight sides to a sharp tip, dark tip, little bend): upright, pointed, cupped (hollow faces forward/out), tilted out and back, with long cream fluff inside. o: {L,W,T,cup,cIn,cOut,cRim,fl (fluff length)} */
+function earGeo(L, W, T, cup, inner, cIn, cOut, cRim, fox) { const NA = 24, NV = 20, pos = [], uv = [], col = [], idx = [];
+  const wv = fox ? (v => Math.pow(1 - v, 0.95) * (1 + 0.12 * Math.sin(Math.PI * v)) + 0.004) : v => (v < 0.3 ? 0.7 + 0.3 * Math.sin(v / 0.3 * Math.PI / 2) : Math.pow(Math.cos((v - 0.3) / 0.7 * Math.PI / 2), 0.85)) * (1 - 0.04 * v) + 0.005;
+  for (let j = 0; j <= NV; j++) { const v = j / NV, w = wv(v); for (let i = 0; i <= NA; i++) { const a = i / NA * Math.PI * 2, ca = Math.cos(a), sa = Math.sin(a); const bend = L * (fox ? 0.1 : 0.32) * v * v, x = W * w * ca, y = L * v * (1 - 0.12 * v), z = T * w * sa - cup * w * (1 - ca * ca) + (inner ? T * 0.6 * w : 0) - bend;   /* the ear curves backward along its length, like a real ear */
+    pos.push(x, y, z); uv.push(i / NA, v * 2); let c = inner ? cIn.clone() : (sa > 0.2 ? cIn.clone().lerp(cOut, 0.15) : cOut.clone()); if (!inner && Math.abs(ca) > 0.8) c.lerp(cRim, 0.4); if (!inner && v > (fox ? 0.62 : 0.85)) c.lerp(cRim, fox ? 0.9 : 0.6); col.push(c.r, c.g, c.b); } }
+  for (let j = 0; j < NV; j++) for (let i = 0; i < NA; i++) { const a = j * (NA + 1) + i, b = a + NA + 1; idx.push(a, b, a + 1, b, b + 1, a + 1); }
+  const g = new THREE.BufferGeometry(); g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2)); g.setAttribute("color", new THREE.Float32BufferAttribute(col, 3)); g.setIndex(idx); g.computeVertexNormals(); return g; }
+function makeEar(sd, o) { const eg = new THREE.Group(); const cIn = o.cIn.clone().lerp(new THREE.Color(1, 1, 1), 0.25);
+  const outer = furShells({ geo: earGeo(o.L, o.W, o.T || 0.035, o.cup || o.W * 0.45, false, cIn, o.cOut, o.cRim, o.fox), layers: 8, len: 0.02, rep: [0.25, 0.4] });
+  const fluff = furShells({ geo: earGeo(o.L * (o.fox ? 0.72 : 0.8), o.W * (o.fox ? 0.75 : 0.65), (o.T || 0.035) * 0.6, (o.cup || o.W * 0.45) * 0.66, true, cIn, o.cOut, o.cRim, o.fox), layers: 12, len: o.fl || 0.06, rep: [0.35, 0.35] }); fluff.position.y = o.L * 0.05; eg.add(outer, fluff);
+  eg.scale.set(1, 1, sd); eg.rotation.order = "ZXY"; eg.rotation.set(sd * (o.out == null ? 0.5 : o.out), sd * 0.55, o.back == null ? 0.38 : o.back); return eg; }
+
+/* shared helpers for the four mission creatures (all vertex colours, no canvas textures). All face +x, roots at game scale. */
+const m4h = (x, y) => { const s = Math.sin(x * 127.1 + y * 311.7) * 43758.5453; return s - Math.floor(s); };
+function m4even(m, k) { m.onBeforeCompile = sh => { sh.fragmentShader = sh.fragmentShader.replace("#include <emissivemap_fragment>", "#include <emissivemap_fragment>\n totalEmissiveRadiance += vColor * " + k.toFixed(2) + ";"); }; m.customProgramCacheKey = () => "m4even" + k; return m; }
+/* vertex-colour material that also reads a per-vertex aGlow (0..1) and glows there, with an optional slow pulse */
+function m4glowMat(o = {}) { const U = { uT: { value: 0 } }, k = (o.k ?? 1.2).toFixed(2), pu = (o.pulse ?? 0).toFixed(2);
+  const m = new THREE.MeshPhysicalMaterial({ vertexColors: true, roughness: o.r ?? 0.45, clearcoat: o.cc ?? 0.4, clearcoatRoughness: 0.3, side: o.side || THREE.FrontSide, transparent: !!o.op, opacity: o.op || 1, depthWrite: !o.op });
+  m.onBeforeCompile = sh => { sh.uniforms.uT = U.uT; sh.vertexShader = "attribute float aGlow; varying float vGlow;\n" + sh.vertexShader.replace("#include <begin_vertex>", "#include <begin_vertex>\n vGlow = aGlow;");
+    sh.fragmentShader = "uniform float uT; varying float vGlow;\n" + sh.fragmentShader.replace("#include <emissivemap_fragment>", "#include <emissivemap_fragment>\n totalEmissiveRadiance += vColor * vGlow * (" + k + " + " + pu + " * sin(uT * 2.0)) + vColor * " + (o.even ?? 0).toFixed(2) + ";" + (o.rim ? "\n float rimF = 1.0 - abs(dot(normalize(normal), normalize(vViewPosition))); totalEmissiveRadiance += vec3(" + o.rim.r.toFixed(3) + "," + o.rim.g.toFixed(3) + "," + o.rim.b.toFixed(3) + ") * pow(rimF, 2.2) * " + (o.rimK ?? 1.5).toFixed(2) + ";" : "")); };
+  m.customProgramCacheKey = () => "m4g" + k + pu + (o.op || 1) + (o.even || 0) + (o.rim ? "r" + o.rim.getHexString() + (o.rimK || 1.5) : ""); m.userData.U = U; return m; }
+/* tube with colour + glow from pat(f, a, u) -> [Color, glow] (a = 0 on top) */
+function m4tube(pts, rad, pat, o = {}) { const GL = []; const g = tubePT(pts, rad, Object.assign({}, o, { colFn: (f, a, u) => { const r = pat(f, a, u); GL.push(r[1] || 0); return r[0]; } })); g.setAttribute("aGlow", new THREE.Float32BufferAttribute(GL, 1)); return g; }
+/* static geometry: add colour + glow from a function of the vertex position */
+function m4paint(g, fn) { const P = g.attributes.position, C = [], G = []; for (let i = 0; i < P.count; i++) { const r = fn(P.getX(i), P.getY(i), P.getZ(i)); C.push(r[0].r, r[0].g, r[0].b); G.push(r[1] || 0); } g.setAttribute("color", new THREE.Float32BufferAttribute(C, 3)); g.setAttribute("aGlow", new THREE.Float32BufferAttribute(G, 1)); return g; }
+/* a sheet (fins, wings, membranes): grid NU x NV, colour/glow from cf(u, v); set(P(u, v)) each frame */
+function m4sheet(NU, NV, cf, mat) { const n = (NU + 1) * (NV + 1), g = new THREE.BufferGeometry(), pos = new Float32Array(n * 3), C = [], G = [], idx = [];
+  for (let i = 0; i <= NU; i++) for (let j = 0; j <= NV; j++) { const r = cf(i / NU, j / NV); C.push(r[0].r, r[0].g, r[0].b); G.push(r[1] || 0); }
+  for (let i = 0; i < NU; i++) for (let j = 0; j < NV; j++) { const a = i * (NV + 1) + j, b = a + NV + 1; idx.push(a, b, a + 1, b, b + 1, a + 1); }
+  g.setAttribute("position", new THREE.BufferAttribute(pos, 3)); g.setAttribute("color", new THREE.Float32BufferAttribute(C, 3)); g.setAttribute("aGlow", new THREE.Float32BufferAttribute(G, 1)); g.setIndex(idx);
+  const m = new THREE.Mesh(g, mat); m.frustumCulled = false; m.castShadow = true; m.receiveShadow = true;
+  m.set = P => { let k = 0; for (let i = 0; i <= NU; i++) for (let j = 0; j <= NV; j++) { const p = P(i / NU, j / NV); pos[k++] = p.x; pos[k++] = p.y; pos[k++] = p.z; } g.attributes.position.needsUpdate = true; g.computeVertexNormals(); };
+  return m; }
+/* drifting glowing motes */
+function m4wisps(parent, n, col, spawn, o = {}) { const mat = new THREE.MeshBasicMaterial({ color: lin(col), transparent: true, opacity: o.op ?? 0.9, blending: THREE.AdditiveBlending, depthWrite: false });
+  const im = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1, 1), mat, n); im.frustumCulled = false; im.renderOrder = 6; parent.add(im);
+  const W = [...Array(n)].map(() => ({ p: new V(), v: new V(), life: 9, max: 1, sz: 0.04, ph: Math.random() * 6 })), m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new V(); let acc = 0;
+  return { mat, update: (dt, t, rate = 1) => { acc = Math.min(3, acc + dt * (o.rate || 30) * rate);
+    W.forEach((w, i) => { w.life += dt; if (w.life >= w.max) { if (acc >= 1) { acc -= 1; spawn(w); w.life = 0; w.max = (o.life || 2) * (0.7 + Math.random() * 0.8); w.sz = (o.size || 0.05) * (0.6 + Math.random() * 0.8); } else { sc.set(0, 0, 0); m4.compose(w.p, q, sc); im.setMatrixAt(i, m4); return; } }
+      w.p.addScaledVector(w.v, dt); w.p.x += Math.sin(t * 1.7 + w.ph) * 0.08 * dt * (o.wob || 1); w.p.z += Math.cos(t * 1.3 + w.ph) * 0.08 * dt * (o.wob || 1); w.v.multiplyScalar(1 - 0.3 * dt);
+      const f = w.life / w.max; sc.setScalar(Math.max(0, w.sz * Math.sin(Math.PI * Math.min(1, f)))); m4.compose(w.p, q, sc); im.setMatrixAt(i, m4); });
+    im.instanceMatrix.needsUpdate = true; } }; }
+/* a smooth limb through joints J with radii per joint */
+function m4limb(J, RJ, pat, o = {}) { const n = o.n || 24, pts = new THREE.CatmullRomCurve3(J).getPoints(n), m = J.length - 1;
+  const rr = pts.map((p, i) => { const s = i / n * m, j = Math.min(m - 1, Math.floor(s)), u = s - j; return RJ[j] + (RJ[j + 1] - RJ[j]) * u; });
+  return m4tube(pts, rr, pat, { sg: o.sg || 14, cap: true, uArr: o.uArr }); }
+
+/* PETAL FAWN v2 (working name; Petra 2026-11-21: "actually like a deer" + mouth opens way better). Large CARNIVORE that looks like a sweet, pretty deer:
+   slim body, long neck, long slender legs with cloven hooves, a deer head with big doe eyes and big petal ears held out to the sides, soft rose-fawn coat with white fawn spots,
+   a collar of flower petals, a short fluffy tail with a little glowing flower. No antlers.
+   The trick: its whole muzzle is made of FOUR PETALS. When it attacks, the muzzle splits open into a four-petal flower, every petal lined with needle teeth,
+   a deep red glowing throat in the middle; the collar flares forward and the eyes turn red. Model only (Standing / Flower jaw open). Male: a bit bigger, second petal ring + petal crown. */
+function buildPetalFawn(sex) {
+  const M = sex === "m", root = new THREE.Group(), rig = new THREE.Group(); root.add(rig); rig.scale.setScalar((M ? 1.1 : 1) * 1.15);
+  const cCoat = lin("#e9b9a6"), cBack = lin("#d79a88"), cCream = lin("#fff1e8"), cBlush = lin("#f7c0cf"), cPink = lin("#ec8db0"), cLav = lin("#c4a2ee"), cGold = lin("#ffd46a"), cMouth = lin("#5a0814"), cHoof = lin("#5a3438");
+  const skin = m4glowMat({ r: 0.75, cc: 0.15, k: 1.2, rim: lin("#ffe0ea"), rimK: 0.4 });
+  /* coat pattern (pinned to the body): soft darker saddle stripe, three rows of jittered white fawn dapples, and little five-petal pink flower marks on shoulder and hip */
+  const pat = (f, a, u) => { const up = Math.cos(a), ph = a <= Math.PI ? a : 2 * Math.PI - a;
+    let c = cCoat.clone().lerp(cBack, sstep(0.45, 0.98, up) * 0.75).lerp(cCream, sstep(-0.15, -0.6, up));
+    const body = sstep(1.75, 2.1, u) * (1 - sstep(4.2, 4.55, u));
+    let sp = 0; [[0.38, 0.27, 0], [0.72, 0.3, 0.13], [1.05, 0.34, 0.07]].forEach(([k, step, off], ri) => { const q = (u + off) / step, n = Math.round(q), jx = (m4h(n, ri) - 0.5) * 0.35, jy = (m4h(ri, n) - 0.5) * 0.12, rs = 0.045 + 0.03 * m4h(n + 7, ri + 3);
+      const d = Math.sqrt(Math.pow((q - n - jx) * step, 2) + Math.pow((ph - k - jy) * 0.5, 2)); sp = Math.max(sp, (1 - sstep(rs * 0.75, rs, d)) * (ri === 2 ? sstep(2.2, 2.6, u) * (1 - sstep(3.6, 3.9, u)) : 1)); });
+    sp *= body; c.lerp(cCream, sp * 0.95);
+    let fl = 0; [[2.15, 1.25], [3.95, 1.2]].forEach(([fu, fp]) => { const du = u - fu, dp = (ph - fp) * 0.48, r = Math.sqrt(du * du + dp * dp), th = Math.atan2(dp, du), petalR = 0.11 * (0.55 + 0.45 * Math.abs(Math.cos(th * 2.5)));
+      fl = Math.max(fl, 1 - sstep(petalR * 0.85, petalR, r)); if (r < 0.03) fl = 2; });
+    if (fl > 0) c.lerp(fl > 1.5 ? cGold : cPink, fl > 1.5 ? 0.9 : fl * 0.8);
+    c.multiplyScalar(0.97 + 0.03 * m4h(Math.floor(u * 14), Math.floor(a * 10))); return [c, sp * 0.1 + (fl > 1.5 ? 0.6 : fl * 0.15)]; };
+  const bodyMesh = mk(new THREE.BufferGeometry(), skin); bodyMesh.frustumCulled = false; rig.add(bodyMesh);
+  const petalM = m4glowMat({ r: 0.55, cc: 0.35, k: 1.2, side: THREE.DoubleSide, rim: lin("#ffe0f0"), rimK: 0.5 });
+  const petal = (L, W, cf, cup = 0.25) => { const m = m4sheet(8, 10, cf, petalM); m.set((u, v) => { const w = W * Math.pow(Math.sin(Math.PI * Math.min(1, v * 0.92 + 0.08)), 0.7) * (1 - 0.35 * v * v), x = (u - 0.5) * 2 * w; return new V(x, v * L, cup * (1 - Math.pow((u - 0.5) * 2, 2)) * Math.sin(Math.PI * v) * W * 2 - 0.15 * v * v * L); }); return m; };
+  const petCol = (base, tip, glow = 0.3) => (u, v) => { const e = sstep(0.55, 1, v); return [base.clone().lerp(tip, e), e * glow]; };
+  /* ---------- head: deer skull + a muzzle made of four petals ---------- */
+  const head = new THREE.Group(); rig.add(head);
+  /* deer head: ONE smooth surface (rounded cranium, sloping forehead, straight nose bridge, blunt muzzle), shape copied from Ypyci's soft deer head and made longer.
+     Same surface formula for skull and the four muzzle petals, with exact normals, so the closed snout has no lumps or seams. */
+  const KN = [[0.20, -0.19, 0.22], [0.30, -0.23, 0.255], [0.32, -0.225, 0.25], [0.285, -0.205, 0.225], [0.225, -0.18, 0.19], [0.19, -0.15, 0.16], [0.16, -0.125, 0.135], [0.14, -0.105, 0.12], [0.125, -0.09, 0.11]];
+  const KX0 = -0.26, KDX = 0.082, KX1 = KX0 + KDX * (KN.length - 1), CAPB = 0.07, CAPF = 0.1, HX0 = KX0 - CAPB, XT = KX1 + CAPF, XM = 0.1;
+  const prof = x => { const xc = Math.max(KX0, Math.min(KX1, x)), q = (xc - KX0) / KDX, i = Math.min(KN.length - 2, Math.floor(q)), u = q - i, g = k => KN[Math.max(0, Math.min(KN.length - 1, k))];
+    const cr = j => { const p0 = g(i - 1)[j], p1 = g(i)[j], p2 = g(i + 1)[j], p3 = g(i + 2)[j]; return 0.5 * (2 * p1 + (-p0 + p2) * u + (2 * p0 - 5 * p1 + 4 * p2 - p3) * u * u + (-p0 + 3 * p1 - 3 * p2 + p3) * u * u * u); };
+    let top = cr(0), bot = cr(1), w = cr(2), cap = 1; if (x < KX0) cap = Math.sqrt(Math.max(0, 1 - Math.pow((KX0 - x) / CAPB, 2))); if (x > KX1) cap = Math.sqrt(Math.max(0, 1 - Math.pow((x - KX1) / CAPF, 2)));
+    const yc = (top + bot) / 2 + (x > KX1 ? -0.25 * (x - KX1) : 0); return { yc, h: (top - bot) / 2 * cap, w: w * cap }; };
+  const HP = (x, a, s = 1) => { const p = prof(x); return new V(x, p.yc + Math.cos(a) * p.h * s, Math.sin(a) * p.w * s); };
+  const HN = (x, a, s = 1) => { const e = 1e-3, dx = HP(x + e, a, s).sub(HP(x - e, a, s)), da = HP(x, a + e, s).sub(HP(x, a - e, s)), n = new V().crossVectors(da, dx); if (n.lengthSq() < 1e-22) n.set(x > 0 ? 1 : -1, 0, 0); n.normalize();
+    const p = HP(x, a, s); if (n.dot(new V(0, p.y - prof(x).yc, p.z)) + n.x * (x - 0.15) * 0.01 < 0) n.negate(); return n; };
+  const hcolA = (x, a) => { const up = Math.cos(a), sd = Math.abs(Math.sin(a));
+    let c = cCoat.clone().lerp(cBack, sstep(0.3, 0.95, up) * 0.55).lerp(cCream, sstep(-0.1, -0.6, up) * 0.85);
+    c.lerp(cBack.clone().multiplyScalar(0.85), sstep(-0.05, 0.1, x) * (1 - sstep(0.5, 0.58, x)) * (1 - sstep(0.04, 0.14, sd)) * sstep(0.6, 0.9, up) * 0.45);
+    c.lerp(cCream, sstep(0.42, 0.52, x) * sstep(0.35, -0.2, up) * 0.9);
+    const bx = (x - 0.06) / 0.09, by = (up + 0.15) / 0.3, blush = Math.max(0, 1 - bx * bx - by * by); c.lerp(cBlush, sstep(0, 0.6, blush) * 0.75 * sstep(0.5, 0.9, sd)); return c; };
+  const headGeo = (xa, xb, a0, a1, NX, NA, s = 1) => { const pos = [], nor = [], col = [], idx = [];
+    for (let i = 0; i <= NX; i++) { const x = xa + (xb - xa) * i / NX; for (let j = 0; j <= NA; j++) { const a = a0 + (a1 - a0) * j / NA, p = HP(x, a, s), n = HN(x, a, s), c = hcolA(x, a); pos.push(p.x, p.y, p.z); nor.push(n.x, n.y, n.z); col.push(c.r, c.g, c.b); } }
+    for (let i = 0; i < NX; i++) for (let j = 0; j < NA; j++) { const a = i * (NA + 1) + j, b = a + NA + 1; idx.push(a, a + 1, b, b, a + 1, b + 1); }
+    const g = new THREE.BufferGeometry(); g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute("normal", new THREE.Float32BufferAttribute(nor, 3)); g.setAttribute("color", new THREE.Float32BufferAttribute(col, 3));
+    g.setAttribute("aGlow", new THREE.Float32BufferAttribute(new Array(pos.length / 3).fill(0), 1)); g.setIndex(idx); return g; };
+  const outM = m4glowMat({ r: 0.75, cc: 0.15, k: 1.2, rim: lin("#ffe0ea"), rimK: 0.4, side: THREE.DoubleSide });
+  head.add(mk(headGeo(HX0, XM, 0, Math.PI * 2, 30, 48), outM));
+  /* big glossy doe eyes set on the sides of the head */
+  const eyeM = new THREE.MeshPhysicalMaterial({ color: lin("#24101e"), roughness: 0.04, clearcoat: 1, emissive: lin("#2a0c22"), emissiveIntensity: 0.3 }), hiM = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  const lidM = new THREE.MeshStandardMaterial({ color: cBack, roughness: 0.8 }), lids = [];
+  [-1, 1].forEach(sd => { const ex = -0.06, ea = sd * 1.02, p = HP(ex, ea, 0.93), n = HN(ex, ea), g = new THREE.Group(); g.position.copy(p); head.add(g);
+    n.x += 0.35; n.normalize(); g.rotation.order = "YXZ"; g.rotation.set(-Math.asin(n.y), Math.atan2(n.x, n.z), 0);
+    const e = mk(new THREE.SphereGeometry(0.06, 18, 12), eyeM); e.scale.set(1.3, 1.0, 0.6); g.add(e);
+    [[0.026, 0.024, 0.034, 0.021], [-0.022, -0.022, 0.034, 0.011]].forEach(([x, y, z, r]) => { const h = mk(new THREE.SphereGeometry(r, 10, 8), hiM); h.position.set(x * sd, y, z); g.add(h); });
+    const lid = mk(new THREE.SphereGeometry(0.064, 16, 10), lidM); lid.scale.set(1.32, 1.02, 0.62); lid.visible = false; g.add(lid); lids.push(lid); });
+  /* petal ears (the v2 petals), mirrored so both sides match, set high on the back of the head like a deer's: upright, tilted out and back, cupped forward */
+  const EARS = [-1, 1].map(sd => { const e = petal(0.44, 0.16, (u, v) => { const inner = 1 - Math.abs(u - 0.5) * 2, c = cPink.clone().lerp(cLav, sstep(0.55, 1, v)).lerp(cCream, inner * (1 - sstep(0.25, 0.75, v)) * 0.85); return [c, sstep(0.8, 1, v) * 0.3]; }, 0.4);
+    e.position.y = -0.04; const g = new THREE.Group(), p = HP(-0.2, sd * 0.62); g.position.set(p.x, p.y - 0.02, p.z); g.add(e); g.scale.z = -sd; g.rotation.order = "ZXY"; head.add(g); return { g, sd }; });
+  if (M) [-0.5, 0, 0.5].forEach(a => { const p = petal(0.26, 0.09, petCol(cBlush, cGold, 0.6), 0.3), q = HP(-0.1 + a * 0.04, a * 0.5, 0.95); p.position.copy(q); p.rotation.set(a * 0.7, 0, 0.35); head.add(p); });
+  /* the four-petal muzzle: top, two sides and chin are four shells of the same surface, hinged at the muzzle base; closed = a normal deer snout */
+  const TEETH = [], toothM = new THREE.MeshPhysicalMaterial({ color: lin("#fffaf2"), roughness: 0.2, clearcoat: 1 });
+  const inM = new THREE.MeshStandardMaterial({ color: lin("#b0102e"), emissive: lin("#ff2a50"), emissiveIntensity: 0.7, side: THREE.BackSide });
+  const noseM = new THREE.MeshPhysicalMaterial({ color: lin("#4a2630"), roughness: 0.25, clearcoat: 0.9 });
+  const QUAD = [0, 1, 2, 3].map(k => { const p0 = k * Math.PI / 2 - Math.PI / 4, ac = p0 + Math.PI / 4, pivot = HP(XM, ac), g = new THREE.Group(); g.position.copy(pivot); head.add(g);
+    const inner = new THREE.Group(); inner.position.copy(pivot).negate(); g.add(inner);
+    inner.add(mk(headGeo(XM, XT, p0, p0 + Math.PI / 2, 22, 12), outM)); inner.add(mk(headGeo(XM, XT - 0.004, p0, p0 + Math.PI / 2, 22, 12, 0.94), inM));
+    [p0 + 0.06, p0 + Math.PI / 2 - 0.06].forEach((pe, side) => { for (let j = 0; j < 7; j++) { const x = XM + 0.04 + (KX1 - XM) * j / 6, pos = HP(x, pe, 0.92);
+      const tang = HP(x, pe + (side ? 0.3 : -0.3), 0.92).sub(pos).normalize(), inw = new V(0, prof(x).yc - pos.y, -pos.z).normalize(), tt = mk(new THREE.ConeGeometry(0.014 + 0.006 * (j % 2), 0.07 + 0.045 * (j % 2), 5), toothM); tt.position.copy(pos);
+      tt.quaternion.setFromUnitVectors(new V(0, 1, 0), tang.multiplyScalar(0.8).addScaledVector(inw, 0.5).normalize()); inner.add(tt); TEETH.push(tt); } });
+    const c = new V(0, Math.cos(ac), Math.sin(ac)), axis = new V(0, -c.z, c.y).normalize(); return { g, axis, c, k }; });
+  const nose = new THREE.Group(); head.add(nose); { const pn = prof(XT - 0.03); nose.position.set(XT - 0.025, pn.yc + pn.h * 0.35, 0);
+    const b = mk(new THREE.SphereGeometry(0.06, 14, 10), noseM); b.scale.set(0.55, 0.7, 1.25); nose.add(b);
+    [-1, 1].forEach(sd => { const n = mk(new THREE.SphereGeometry(0.014, 8, 6), new THREE.MeshBasicMaterial({ color: 0x1a0a10 })); n.position.set(0.03, -0.005, sd * 0.035); nose.add(n); }); }
+  const throatM = new THREE.MeshStandardMaterial({ color: cMouth, emissive: lin("#ff2040"), emissiveIntensity: 1.2, roughness: 0.5 });
+  const PM = prof(XM), throat = mk(new THREE.SphereGeometry(1, 16, 12), throatM); throat.position.set(XM + 0.02, PM.yc, 0); throat.scale.set(0.05, PM.h * 0.9, PM.w * 0.9); head.add(throat);
+  const THR = [...Array(12)].map((_, k) => { const a = k / 12 * Math.PI * 2, tt = mk(new THREE.ConeGeometry(0.018, 0.09, 5), toothM); tt.position.set(XM + 0.05, PM.yc + Math.cos(a) * PM.h * 0.78, Math.sin(a) * PM.w * 0.78); tt.quaternion.setFromUnitVectors(new V(0, 1, 0), new V(0.4, -Math.cos(a), -Math.sin(a)).normalize()); head.add(tt); TEETH.push(tt); return tt; });
+  /* ---------- petal collar + tail flower ---------- */
+  const RING = []; const NR = 14; [0].forEach(r => { for (let k = 0; k < NR; k++) { const p = petal(r ? 0.56 : 0.7, r ? 0.19 : 0.24, (u, v) => { const e = sstep(0.5, 1, v); return [(r ? cBlush : cPink).clone().lerp(r ? cGold : cLav, e), e * 0.4]; }, 0.3); rig.add(p); RING.push({ p, r, a: (k + 0.5 * r) / NR * Math.PI * 2, base: Float32Array.from(p.geometry.attributes.color.array) }); } });
+  const sickC = new THREE.Color(), sickTmp = new THREE.Color(); let sickKey = "";
+  const bloomG = new THREE.Group(); rig.add(bloomG);
+  const BL = [...Array(8)].map((_, k) => { const p = petal(0.5, 0.17, petCol(cBlush, cLav, 0.45), 0.4); bloomG.add(p); return { p, a: k / 8 * Math.PI * 2, o: 1.6 }; }).concat([...Array(6)].map((_, k) => { const p = petal(0.34, 0.13, petCol(cCream, cPink, 0.5), 0.45); bloomG.add(p); return { p, a: (k + 0.5) / 6 * Math.PI * 2, o: 0.75 }; }));
+  const STAM = [...Array(9)].map((_, k) => { const m = mk(new THREE.CylinderGeometry(0.008, 0.008, 0.2, 4).translate(0, 0.1, 0), new THREE.MeshStandardMaterial({ color: cGold, emissive: cGold, emissiveIntensity: 1.2 })); const b = mk(new THREE.SphereGeometry(0.022, 8, 6), new THREE.MeshStandardMaterial({ color: cGold, emissive: cGold, emissiveIntensity: 2 })); b.position.y = 0.2; m.add(b); bloomG.add(m); return { m, a: k / 9 * Math.PI * 2 }; });
+  const heart = mk(new THREE.SphereGeometry(0.075, 12, 8), new THREE.MeshStandardMaterial({ color: cGold, emissive: cGold, emissiveIntensity: 1.6 })); bloomG.add(heart);
+  const pollen = m4wisps(rig, 30, "#ffe08a", o => { o.p.copy(bloomG.position).add(new V((Math.random() - 0.5) * 0.2, (Math.random() - 0.5) * 0.2, (Math.random() - 0.5) * 0.2)); o.v.set((Math.random() - 0.5) * 0.2, 0.1 + Math.random() * 0.2, (Math.random() - 0.5) * 0.2); }, { rate: 6, life: 2.4, size: 0.025, op: 0.8 });
+  /* ---------- long slender deer legs, hock joints, cloven hooves ---------- */
+  const hoofM = new THREE.MeshPhysicalMaterial({ color: cHoof, roughness: 0.3, clearcoat: 0.8 });
+  /* a leg made of STRAIGHT bones: tiny rounded corners only at the joints, muscle on the upper bone, a slim cannon and a knobby knee / hock / fetlock */
+  const legGeo = (P, keys, knobs, pat) => { const pts = [], sA = []; let acc = 0;
+    const push = p => { if (pts.length) acc += p.distanceTo(pts[pts.length - 1]); pts.push(p); sA.push(acc); };
+    const JS = [0]; push(P[0].clone());
+    for (let k = 0; k < P.length - 1; k++) { const a = P[k], b = P[k + 1], L = a.distanceTo(b), dir = new V().subVectors(b, a).normalize();
+      const cIn = k > 0 ? Math.min(0.06, L * 0.25) : 0, last = k === P.length - 2, cOut = last ? 0 : Math.min(0.06, L * 0.25, P[k + 1].distanceTo(P[k + 2]) * 0.25), n = Math.max(3, Math.round(L / 0.05));
+      for (let i = 1; i <= n; i++) { const u = cIn / L + (1 - (cIn + cOut) / L) * i / n; push(a.clone().addScaledVector(dir, u * L)); }
+      if (!last) { const d2 = new V().subVectors(P[k + 2], b).normalize(), e = b.clone().addScaledVector(d2, cOut), st = pts[pts.length - 1].clone();
+        for (let i = 1; i <= 4; i++) { const q = i / 4, p = st.clone().multiplyScalar((1 - q) * (1 - q)).addScaledVector(b, 2 * q * (1 - q)).addScaledVector(e, q * q); if (i === 2) JS.push(acc + p.distanceTo(pts[pts.length - 1])); push(p); } } }
+    JS.push(acc); const tot = acc;
+    const base = sv => { const K = keys.map(([j, off, r]) => [JS[j] + off, r]); if (sv <= K[0][0]) return K[0][1]; for (let i = 1; i < K.length; i++) if (sv <= K[i][0]) { const u = (sv - K[i - 1][0]) / Math.max(1e-6, K[i][0] - K[i - 1][0]); return K[i - 1][1] + (K[i][1] - K[i - 1][1]) * (u * u * (3 - 2 * u)); } return K[K.length - 1][1]; };
+    const rr = sA.map(sv => { let r = base(sv); knobs.forEach(([j, a, w]) => { r = Math.max(r, a * Math.exp(-Math.pow((sv - JS[j]) / w, 2))); }); return r; });
+    return m4tube(pts, rr, pat, { sg: 14, cap: true, uArr: sA.map(x => x * 0.9) }); };
+  const LEGS = [[0.771, 1, 1], [0.771, -1, 1], [0.42, 1, 0], [0.42, -1, 0]].map(([s, sd, front]) => { const m = mk(new THREE.BufferGeometry(), skin); m.frustumCulled = false; rig.add(m);
+    const ft = new THREE.Group(); rig.add(ft); [-1, 1].forEach(h => { const c = mk(new THREE.SphereGeometry(0.085, 12, 8, 0, Math.PI * 2, 0, Math.PI * 0.6), hoofM); c.scale.set(1.4, 1.5, 1.05); c.position.set(0.03, 0.0, h * 0.065); c.rotation.z = -0.5; ft.add(c); });
+    const tip = mk(new THREE.SphereGeometry(0.065, 10, 8), skin); tip.scale.set(1, 0.75, 0.75); tip.visible = false; rig.add(tip);
+    return { s, sd, front, m, ft, tip }; });
+  /* ---------- pose ---------- */
+  let t = 0, ph = 0, tp = 0, tz = 0, mode = "idle"; const Wt = { idle: 1, walk: 0, run: 0, drink: 0, sleep: 0, bloom: 0 };
+  root.userData.setMode = m => { mode = m; };
+  const NS = 130, X0 = -3.45, X1 = 1.25, LEN = X1 - X0, PTS = [...Array(NS + 1)].map(() => new V());
+  const R = profF([[0, 0.07], [0.04, 0.115], [0.1, 0.1], [0.17, 0.095], [0.23, 0.11], [0.28, 0.15], [0.32, 0.215], [0.36, 0.3], [0.4, 0.38], [0.45, 0.44], [0.542, 0.47], [0.679, 0.475], [0.74, 0.45], [0.79, 0.4], [0.84, 0.33], [0.89, 0.265], [0.94, 0.22], [1, 0.205]]);
+  const uArr = PTS.map((_, i) => i * LEN / NS);
+  root.userData.update = dt => { t += dt; for (const k in Wt) Wt[k] += ((k === mode ? 1 : 0) - Wt[k]) * Math.min(1, dt * 3.0);
+    const w = Wt, bl = w.bloom, wk = w.walk, rn = w.run, dk = w.drink, sl = w.sleep, mv = wk + rn, TAU = Math.PI * 2;
+    ph = (ph + dt * (1.5 * wk + 2.3 * rn)) % 1; tp += dt * (1.2 + 1.6 * wk + 2.2 * rn); tz += dt * (0.9 + 1.0 * wk + 1.4 * rn);
+    const bob = -0.03 * wk * Math.abs(Math.sin(TAU * ph)) + 0.05 * rn * Math.sin(TAU * ph) - 0.03 * wk - 0.08 * rn, pitch = 0.06 * rn * Math.cos(TAU * ph), breathe = Math.sin(t * 1.5);
+    const rise = 1.5 - 0.95 * bl - 0.9 * sl - 2.75 * dk - 0.35 * rn + 0.05 * wk * Math.sin(TAU * ph * 2) + 0.03 * sl * breathe, fwd = 0.35 - 0.45 * bl - 0.15 * sl - 0.95 * dk - 0.3 * rn;
+    for (let i = 0; i <= NS; i++) { const s = i / NS, x = X0 + LEN * s;
+      const neckU = sstep(0.0, 1.6, x) / 0.877, tq0 = Math.max(0, Math.min(1, (-1.6 - x) / 1.85)), tq = tq0 * tq0 / (tq0 + 0.3) * 1.3, tail = tq, lift = 1 - 0.65 * sl;
+      const y = 2.05 - 1.3 * sl + bob + pitch * x + (0.95 * tq - 0.45 * tq * tq) * lift + Math.sin(tp * 1.0 - tq * 3) * (0.04 + 0.025 * mv) * tq * (1 - sl) + neckU * rise + Math.sin(t * 1.4) * 0.01 * (1 - mv), xx = x - neckU * neckU * fwd;
+      const xst = x < -1.6 ? (x + 1.6) * 0.45 : 0;
+      PTS[i].set(xx + xst + 0.55 * tq * tq * lift, y, Math.sin(tz - tq * 2) * (0.08 - 0.03 * rn) * tq * (1 - sl) ); }
+    if (sl > 0.01) { const IB = Math.round((-1.6 - X0) / LEN * NS); let prevO = PTS[IB].clone(), prevN = PTS[IB].clone(), th = 0;
+      for (let i = IB - 1; i >= 0; i--) { th += sl * 0.06; const d = new V().subVectors(PTS[i], prevO), c = Math.cos(th), sn = Math.sin(th); prevO = PTS[i].clone();
+        const nd = new V(d.x * c - d.z * sn, d.y * (1 - 0.6 * sl), d.x * sn + d.z * c); PTS[i].copy(prevN).add(nd); prevN = PTS[i].clone(); } }
+    const rad = PTS.map((p, i) => R(i / NS) * (1 + 0.025 * sl * breathe * sstep(0.35, 0.5, i / NS) * (1 - sstep(0.75, 0.85, i / NS))));
+    const hd = new V(1, -0.32 + 0.22 * bl - 1.5 * dk + 0.12 * sl - 0.1 * rn + 0.05 * dk * Math.sin(t * 7), 0).normalize();
+    head.position.copy(PTS[NS]); orient(head, hd); head.translateX(0.24); head.translateY(0.13);
+    /* the neck flows on into the back of the skull: extra tube points curve from the neck top into the head and swell to the head's size */
+    const TN = new V().subVectors(PTS[NS], PTS[NS - 2]).normalize(), HQ = new V(-0.12, 0.04, 0).applyQuaternion(head.quaternion).add(head.position), C1 = PTS[NS].clone().addScaledVector(TN, 0.1);
+    const EP = PTS.slice(), ER = rad.slice(), EU = uArr.slice(); for (let k = 1; k <= 8; k++) { const q = k / 8, a = (1 - q) * (1 - q), b = 2 * (1 - q) * q, c = q * q;
+      EP.push(PTS[NS].clone().multiplyScalar(a).addScaledVector(C1, b).addScaledVector(HQ, c)); ER.push(rad[NS] + (0.2 - rad[NS]) * sstep(0, 1, q)); EU.push(uArr[NS] + q * 0.25); }
+    regeo(bodyMesh, m4tube(EP, ER, pat, { uArr: EU, sg: 96, cap: true, ry: (f, a) => Math.cos(a) < 0 ? 1.0 + 0.12 * (1 - sstep(0.93, 0.985, f)) : 1.0, rz: () => 0.86 }));
+    const frame = s => { const i = Math.max(1, Math.min(NS - 1, Math.round(s * NS))), p = PTS[i], T = new V().subVectors(PTS[i + 1], PTS[i - 1]).normalize(), sd = new V().crossVectors(T, new V(0, 1, 0)).normalize(), up = new V().crossVectors(sd, T).normalize(); return { p, T, sd, up, r: rad[i] }; };
+    const open = bl * (1.1 + 0.05 * Math.sin(t * 6));
+    QUAD.forEach(({ g, axis }) => g.quaternion.setFromAxisAngle(axis, open));
+    TEETH.forEach(tt => tt.scale.setScalar(0.05 + 0.95 * Math.min(1, open * 1.5)));
+    nose.visible = open < 0.05; throat.visible = open > 0.05; throatM.emissiveIntensity = 1.2 + 0.6 * Math.sin(t * 4);
+    eyeM.emissive.copy(lin("#2a0c22")).lerp(lin("#ff1a40"), bl); eyeM.emissiveIntensity = 0.3 + 1.6 * bl;
+    lids.forEach(l => l.visible = (Math.sin(t * 0.9) > 0.985 && bl < 0.5) || sl > 0.5);
+    EARS.forEach(({ g, sd }) => { g.rotation.set(sd * (0.6 - 0.25 * bl + 0.35 * sl), sd * (0.55 - 0.3 * bl), 0.4 + 0.85 * bl + 0.5 * sl + 0.35 * rn + 0.06 * wk * Math.sin(TAU * ph * 2 + sd)); });
+    { const hex = (typeof window !== "undefined" && window.__SICK) || "#6b4a7a", key = hex + (bl * 40 | 0); if (key !== sickKey) { sickKey = key; sickC.copy(lin(hex)); const k = hex.toLowerCase() === "#ffffff" ? 0 : bl * 0.85;
+      RING.forEach(({ p, base }) => { const ca = p.geometry.attributes.color, A = ca.array; for (let i = 0; i < A.length; i += 3) { const l = 0.55 + 0.6 * (0.3 * base[i] + 0.55 * base[i + 1] + 0.15 * base[i + 2]);
+        sickTmp.setRGB(base[i], base[i + 1], base[i + 2]).lerp(new THREE.Color(sickC.r * l, sickC.g * l, sickC.b * l), k); A[i] = sickTmp.r; A[i + 1] = sickTmp.g; A[i + 2] = sickTmp.b; } ca.needsUpdate = true; }); } }
+    RING.forEach(({ p, r, a }) => { const f = frame(r ? 0.905 : 0.875), rd = f.up.clone().multiplyScalar(Math.cos(a)).addScaledVector(f.sd, Math.sin(a));
+      const dir = f.T.clone().multiplyScalar(-0.6 + 1.8 * bl).addScaledVector(rd, 1.0 + 0.3 * bl).normalize(); p.position.copy(f.p).addScaledVector(rd, f.r * 0.95);
+      const hA = new V().crossVectors(f.T, rd).normalize(), zz = new V().crossVectors(hA, dir).normalize(), xx = new V().crossVectors(dir, zz); p.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(xx, dir, zz)); p.scale.setScalar(1 + 0.3 * bl); });
+    { const f = frame(0.0), back = f.T.clone().negate(); bloomG.position.copy(PTS[0]).addScaledVector(back, 0.02);
+      BL.forEach(({ p, a, o }) => { const rd = f.up.clone().multiplyScalar(Math.cos(a)).addScaledVector(f.sd, Math.sin(a)); p.quaternion.setFromUnitVectors(new V(0, 1, 0), back.clone().addScaledVector(rd, o).normalize()); });
+      STAM.forEach(({ m, a }) => { const rd = f.up.clone().multiplyScalar(Math.cos(a)).addScaledVector(f.sd, Math.sin(a)); m.quaternion.setFromUnitVectors(new V(0, 1, 0), back.clone().addScaledVector(rd, 0.35).normalize()); }); }
+    pollen.update(dt, t, 1);
+    LEGS.forEach(L => { const f = frame(L.s), sd = f.sd.clone().multiplyScalar(L.sd), fr = L.front;
+      /* deer legs: the upper bone is hidden in the body; below the belly each leg has ONE visible joint (front: the knee/carpus bends forward, hind: the hock points back), always bending the same way */
+      const top = fr ? f.p.clone().addScaledVector(sd, f.r * 0.62).addScaledVector(f.up, -f.r * 0.05) : f.p.clone().addScaledVector(sd, f.r * 0.62).addScaledVector(f.up, f.r * 0.1).addScaledVector(f.T, -0.16),
+        H = fr ? f.p.clone().addScaledVector(sd, f.r * 0.62).addScaledVector(f.up, -f.r * 0.8) : f.p.clone().addScaledVector(sd, f.r * 0.64).addScaledVector(f.up, -f.r * 0.92).addScaledVector(f.T, 0.1 + 0.1 * sl);
+      const oW = fr ? (L.sd > 0 ? 0.25 : 0.75) : (L.sd > 0 ? 0 : 0.5), oR = fr ? (L.sd > 0 ? 0.5 : 0.56) : (L.sd > 0 ? 0 : 0.06), off = mv > 1e-3 ? (wk * oW + rn * oR) / mv : 0;
+      const sf = mv > 1e-3 ? (0.6 * wk + 0.4 * rn) / mv : 0.6, gs = (ph + off) % 1;
+      /* NEW LEGS (forward kinematics, like a real deer skeleton). Angles are measured from straight down, + = toward the head.
+         Every joint only ever folds the natural way: front knee folds the lower leg BACK, hock folds the cannon FORWARD, never past straight. */
+      let sw = 0, fold = 0; if (mv > 1e-3) { if (gs < sf) sw = 1 - 2 * (gs / sf); else { const u = (gs - sf) / (1 - sf); sw = -Math.cos(Math.PI * u); fold = Math.pow(Math.sin(Math.PI * u), 1.2); } }
+      const amp = fr ? 0.15 * wk + 0.42 * rn : 0.15 * wk + 0.4 * rn, fk = fr ? 0.8 * wk + 1.25 * rn : 0.6 * wk + 0.95 * rn;
+      const la = fr ? 0.95 : 0.8, pl = 0.17; let lb = fr ? 0.73 : 0.79;
+      let a1, a2, a3;
+      if (fr) { a1 = 0.04 + amp * sw + 0.12 * bl + 0.1 * dk; a2 = a1 - fk * fold; a3 = a2 + 0.6 - 1.0 * fold * (fk > 0 ? 1 : 0); }
+      else { a1 = -0.35 + amp * sw; a2 = a1 + 0.38 + fk * fold; a3 = a2 + 0.6 - 0.9 * fold * (fk > 0 ? 1 : 0); }
+      if (sl > 0.001) { const s1 = fr ? 1.15 : -1.0, s2 = fr ? -1.6 : 1.55, s3 = fr ? -1.5 : 1.7; a1 += (s1 - a1) * sl; a2 += (s2 - a2) * sl; a3 += (s3 - a3) * sl; }
+      const dirA = q => new V(Math.sin(q), -Math.cos(q), 0), z0 = H.z + L.sd * (0.02 + 0.1 * dk);
+      /* planted hooves stay ON the ground: the cannon gives or takes a few cm (invisible) instead of the hoof floating or sinking */
+      { const yEnd = H.y + la * dirA(a1).y + lb * dirA(a2).y + pl * dirA(a3).y, plant = (1 - fold) * (1 - sl); lb = Math.max(0.4, lb + Math.max(-0.2, Math.min(0.2, yEnd)) * plant / Math.max(0.3, -dirA(a2).y)); }
+      const J = H.clone().addScaledVector(dirA(a1), la); J.z = (H.z * 2 + z0) / 3; const F = J.clone().addScaledVector(dirA(a2), lb); F.z = z0; const hoof = F.clone().addScaledVector(dirA(a3), pl); hoof.z = z0;
+      if (sl > 0.001) hoof.y = Math.max(hoof.y, 0.05 * sl);
+      const col = (ff, a, u) => { const up = Math.cos(a); return [cCoat.clone().lerp(cBack, sstep(0.3, 0.9, up) * 0.4).lerp(cCream, sstep(0.0, -0.7, up) * 0.6 * (1 - ff)).lerp(cHoof, sstep(0.9, 1, ff) * 0.5), 0]; };
+      /* keys: [joint index, offset along the leg, radius]; joints 0 top, 1 elbow/stifle, 2 knee/hock, 3 fetlock, 4 hoof */
+      const keys = fr ? [[0, 0, 0.21], [1, 0, 0.17], [1, 0.22, 0.155], [2, 0, 0.088], [3, 0, 0.074], [4, 0, 0.08]]
+                      : [[0, 0, 0.3], [1, -0.05, 0.2], [1, 0.3, 0.16], [2, 0, 0.09], [3, 0, 0.075], [4, 0, 0.08]];
+      regeo(L.m, legGeo([top, H, J, F, hoof], keys, [], col));
+      if (!fr) { const up2 = new V().subVectors(H, J).normalize(), dn = new V().subVectors(F, J).normalize(), bk = up2.clone().add(dn).normalize().negate(); L.tip.position.copy(J).addScaledVector(bk, 0.06); L.tip.lookAt(J); }
+      L.ft.position.copy(hoof).setY(hoof.y + 0.03); L.ft.rotation.z = Math.atan2(hoof.x - F.x, F.y - hoof.y); });
+    skin.userData.U.uT.value = t; petalM.userData.U.uT.value = t; };
+  root.userData.modes = [["idle", "Standing"], ["walk", "Walk"], ["run", "Run"], ["drink", "Drink"], ["sleep", "Sleep"], ["bloom", "Flower jaw open"]];
+  root.userData.update(0.016); return root; }
+
+
+return { buildPetalFawn };
+})();
+const N8_STAGES = { yxae: [{ name: "Budling", scale: 0.5, need: 70, walk: 4.4, run: 9.5, jump: 6 }, { name: "Petalfawn", scale: 0.66, need: 150, walk: 5.0, run: 10.8, jump: 6.5 }, { name: "Yxae", scale: 0.84, need: 260, walk: 5.6, run: 12.2, jump: 7 }, { name: "Elder Yxae", scale: 1.0, need: 0, walk: 6.0, run: 13.0, jump: 7 }] };
+const n8bloom = () => { try { return player.bloomT > 0; } catch (e) { return false; } };
+const buildYxaePlayer = () => ncPlayer("yxae", () => N8.buildPetalFawn(SEX_NOW), { size: "Large", ground: true, headAt: new THREE.Vector3(0.75, 1.3, 0), mode: s => s.sleep ? "sleep" : n8bloom() ? "bloom" : s.drink ? "drink" : s.walk > 0.05 ? (s.gal ? "run" : "walk") : "idle" });
+
 // ================= Moonlit Meadow (creature game, first preview) =================
 const $ = id => document.getElementById(id);
 const ss = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
@@ -11853,16 +12208,18 @@ const CREATURES = {
     desc: "A tiny, sleek swimmer with a very dark blue body, glowing amber stripes, a round face with whiskers and four flippers. It eats plants, rests on the shore and floats on its back in the water. Males have a glowing blue tail frill.", special: "Swims, eats plants" },
   lumil: { name: "Lumil", stages: N7_STAGES.lumil, build: i => buildLumilPlayer(i), hp: [125, 195, 300, 380], bite: [8, 16, 25, 34], size: "Tiny", fly: true, omni: true, flyK: 2.3,   /* Petra 2026-11-20: the lantern bat */
     desc: "A tiny black bat with twelve little white eyes, big ears and huge wings that fade to white at the tips, plus a small pair of wings on its tail. The glowing lantern at the end of its tail lures bugs at night. It eats anything, walks slowly but flies fast, and sees in the dark better than any other creature.", special: "Flies fast, glowing lure" },
+  yxae: { name: "Yxae", stages: N8_STAGES.yxae, build: i => buildYxaePlayer(i), hp: [530, 800, 1200, 1530], bite: [62, 95, 140, 182], size: "Large", bloom: true,   /* Petra 2026-11-21: the petal fawn */
+    desc: "A sweet-looking deer with a frill of petals. When it hunts, its face opens into a four-petal flower jaw and its frill turns bruise purple. Fast, with a very strong bite. Its Bloom freezes nearby prey in place.", special: "Bloom: freezes prey" },
 };
 /* Petra: sizes are real groups. Adult size = cube root of the solid body's box volume (no glow, tails or veil).
    Tiny 1.2-1.8, Small 1.8-2.4, Compact 2.4-3.0, Medium 3.0-3.6, Large 3.6-4.4, Huge 4.4-5.6, Colossal 5.6+. Each model is scaled into the middle of its group. */
 const SIZE_TIERS = ["Tiny", "Small", "Compact", "Medium", "Large", "Huge", "Colossal"];
-const NIGHT_VISION = { lumil: 96, qyxovluu: 55, ifidaki: 90, ypyci: 30, solv: 12, vrikuu: 22, pib: 28, ylixilb: 34, exil: 36, ember: 40, uqisa: 42, byvei: 44, gyura: 48, vaygiu: 58, yuibic: 62, vesper: 66, ulysiqa: 70, lykuu: 74, afyx: 84, murk: 88, viluv: 95 };   /* Petra: night vision is a stat; the Afyx sees well at night (the aurora only shows at night) */
+const NIGHT_VISION = { yxae: 71, lumil: 96, qyxovluu: 55, ifidaki: 90, ypyci: 30, solv: 12, vrikuu: 22, pib: 28, ylixilb: 34, exil: 36, ember: 40, uqisa: 42, byvei: 44, gyura: 48, vaygiu: 58, yuibic: 62, vesper: 66, ulysiqa: 70, lykuu: 74, afyx: 84, murk: 88, viluv: 95 };   /* Petra: night vision is a stat; the Afyx sees well at night (the aurora only shows at night) */
 const nvLight = new THREE.AmbientLight(0x9fb4ff, 0); scene.add(nvLight);
 const SIZE_K = { lumil: 0.13, qyxovluu: 0.15, ifidaki: 4.6, ypyci: 0.34, ylixilb: 4.8, pib: 8.3, solv: 0.16, ember: 0.22, exil: 0.79, murk: 2.1, vesper: 2.2, afyx: 3.8 };   /* Petra: each size tier is 2.5x the one below (Medium unchanged) */
 for (const k in SIZE_K) if (CREATURES[k]) CREATURES[k].stages.forEach(st => { st.scale *= SIZE_K[k]; });
 /* Petra 2026-11-18: every creature has its own stats, no two the same. Stamina: how long it can sprint or swim (70 = normal). */
-const STAMINA = { lumil: 98, qyxovluu: 97, ypyci: 82, ifidaki: 53, solv: 96, vrikuu: 92, ember: 90, yuibic: 88, byvei: 84, exil: 80, uqisa: 78, murk: 76, lykuu: 74, vaygiu: 72, ulysiqa: 70, gyura: 66, viluv: 62, vesper: 60, afyx: 50, ylixilb: 42, pib: 38 };   /* Petra: smaller creatures have more stamina */
+const STAMINA = { yxae: 64, lumil: 98, qyxovluu: 97, ypyci: 82, ifidaki: 53, solv: 96, vrikuu: 92, ember: 90, yuibic: 88, byvei: 84, exil: 80, uqisa: 78, murk: 76, lykuu: 74, vaygiu: 72, ulysiqa: 70, gyura: 66, viluv: 62, vesper: 60, afyx: 50, ylixilb: 42, pib: 38 };   /* Petra: smaller creatures have more stamina */
 const SPEED_K = { vrikuu: 1.05, gyura: 1.03, exil: 1.04, byvei: 1.02, murk: 0.97, lykuu: 0.95, uqisa: 0.92, ylixilb: 0.9 };
 for (const k in SPEED_K) if (CREATURES[k]) CREATURES[k].stages.forEach(st => { st.walk = Math.round(st.walk * SPEED_K[k] * 10) / 10; st.run = Math.round(st.run * SPEED_K[k] * 10) / 10; });
 function statsUnique() {   /* any two creatures that still share a number get nudged apart a little, stage by stage (also covers creatures added later) */
@@ -11921,7 +12278,7 @@ const MALE_FIT = new THREE.Vector3(1.1, 1.1, 1.12);
 const sexMark = sx => sx === "m" ? "\u2642" : "\u2640";
 function buildAs(sx, fn) { const old = SEX_NOW; SEX_NOW = sx || "f"; try { return fn(); } finally { SEX_NOW = old; } }
 /* elder looks (Petra): an Elder glows a little brighter and has soft motes of light drifting around it, in its own colour */
-const ELDER_COL = { lumil: "#f4f4ff", qyxovluu: "#ffb35a", ifidaki: "#ffc36a", ypyci: "#c8ff9a", ylixilb: "#d9b8ff", vesper: "#8fb4ff", ember: "#ffa060", murk: "#a98aff", solv: "#ffb3d6", exil: "#ff8a70", byvei: "#7fe8d8", pib: "#ffe6a8", afyx: "#8affd6", gyura: "#bfe4ff", lykuu: "#ffe08a", viluv: "#a8c4ff", uqisa: "#8ff6ff", ulysiqa: "#d6c2ff", yuibic: "#bff0ff", vrikuu: "#d8ff9a", vaygiu: "#ffb0e0" };
+const ELDER_COL = { yxae: "#ffb8e6", lumil: "#f4f4ff", qyxovluu: "#ffb35a", ifidaki: "#ffc36a", ypyci: "#c8ff9a", ylixilb: "#d9b8ff", vesper: "#8fb4ff", ember: "#ffa060", murk: "#a98aff", solv: "#ffb3d6", exil: "#ff8a70", byvei: "#7fe8d8", pib: "#ffe6a8", afyx: "#8affd6", gyura: "#bfe4ff", lykuu: "#ffe08a", viluv: "#a8c4ff", uqisa: "#8ff6ff", ulysiqa: "#d6c2ff", yuibic: "#bff0ff", vrikuu: "#d8ff9a", vaygiu: "#ffb0e0" };
 function addElderLook(api) { const root = api.root, c = col(ELDER_COL[KIND] || "#fff0c0"), done = new Set();
   root.traverse(o => { if (!o.material) return; (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => { if (done.has(m) || !m.emissive || m.emissiveIntensity == null) return; done.add(m); m.emissiveIntensity *= 1.3; }); });
   root.updateMatrixWorld(true); const inv = new THREE.Matrix4().copy(root.matrixWorld).invert(), bx = new THREE.Box3(); root.traverse(o => { if (o.isMesh && o.visible && o.geometry && !(o.material && o.material.transparent)) { o.geometry.computeBoundingBox(); bx.union(o.geometry.boundingBox.clone().applyMatrix4(new THREE.Matrix4().multiplyMatrices(inv, o.matrixWorld))); } });
@@ -11969,6 +12326,9 @@ addEventListener("keydown", e => { if (!started) return; if (e.target && /^(INPU
     if (player.stam >= cost && !player.tired) { player.stam -= cost; player.vy = PST[player.stage].jump * 1.25; player.boostT = 0.8; } else if (!player.airTiredT || player.airTiredT < T - 3) { player.airTiredT = T; toast("Too tired to jump", "Glide down and rest to get your stamina back", 2.2); } return; }
   if (k === " " && (CR().fly || CR().glide) && !player.ground && !player.fly && player.inside == null && player.windup <= 0 && player.airT > 0.08) { player.fly = 1; player.vy = CR().glide ? Math.max(player.vy, -0.5) : Math.max(player.vy, 2); if (!seenFly) { seenFly = true; if (CR().glide) toast("You're gliding!", "Your petal wings carry you slowly down. Press Space again to jump higher (uses stamina). C to dive.", 3.5); else toast("You're flying!", "Hold Space to rise, C to sink. Touch the ground to land.", 3.5); } }
   if (k === "q" && CR().melt) toggleUnder();
+  if (k === "q" && CR().bloom && !player.sleep) { if ((player.bloomCD || 0) > 0) toast("Bloom is recharging", Math.ceil(player.bloomCD) + " seconds", 1.5); else { player.bloomT = 2.5; player.bloomCD = 12; const f = { x: Math.cos(player.face), z: Math.sin(player.face) }; let n = 0;   /* Petra: Yxae's Bloom freezes prey in front of it */
+      critters.forEach(c => { if (!c.alive || c.K.predator && c.kind === "hawk") return; const dx = c.x - player.x, dz = c.z - player.z, d = Math.hypot(dx, dz); if (d < 10 + 4 * sizeK() && (dx * f.x + dz * f.z) / (d || 1) > 0.3) { c.frozenT = 4; n++; } });
+      if (n) toast("Bloom!", n === 1 ? "Your prey is frozen. Bite it now!" : n + " animals are frozen. Bite now!", 2); } }
   if (k === " " && player.ground && player.sitK < 0.3 && !player.sleep && player.windup <= 0 && !player.jumpPrep) { player.jumpPrep = 0.1; }
   if (k === "f") pickUp();
   if (k === "z") trySleep(); if (k === "x") { player.sit = player.sit ? 0 : 1; player.bathe = 0; }
@@ -12347,7 +12707,7 @@ function updatePlayer(dt) {
   if (player.jumpPrep > 0) { player.jumpPrep -= dt; if (player.jumpPrep <= 0) { player.jumpPrep = 0; if (player.ground) { player.vy = PST[player.stage].jump * (CR().glide ? 1.4 : 1); player.ground = false; }   /* Petra: only gliders get really high jumps */ } }
   vx += player.kx; vz += player.kz; const kd = Math.exp(-dt * 6); player.kx *= kd; player.kz *= kd;
   if (player.pounce > 0) { player.pounce -= dt; vx += f.x * player.lunge; vz += f.z * player.lunge; if (tryCatch()) player.pounce = 0; }
-  if (player.cool > 0) player.cool -= dt;
+  if (player.cool > 0) player.cool -= dt; if (player.bloomT > 0) player.bloomT -= dt; if (player.bloomCD > 0) player.bloomCD -= dt;
   if (player.wall && (player.dead || player.sleep || Math.hypot(player.x - player.wall.x, player.z - player.wall.z) > player.wall.r + 3)) player.wall = null;
   let nx = player.x + vx * dt, nz = player.z + vz * dt;
   // bump into trunks and rocks, stay inside the meadow
@@ -12483,6 +12843,7 @@ function updateCritters(dt) {
   const s = sizeK(), sneak = keys.c, run = keys.shift, st = player.stage, nightK = night.k, calm = !!(CR().herb || (CR().sun && !CR().photoCarn));   /* Petra: prey isn't scared of a plant eater */
   critters.forEach(c => {
     if (!c.alive) { c.respawn -= dt; if (c.respawn <= 0) { const i = critters.indexOf(c); critters.splice(i, 1); spawnCritter(c.kind, true); } return; }
+    if (c.frozenT > 0) { c.frozenT -= dt; return; }   /* frozen by a Yxae's Bloom */
     const dx = c.x - player.x, dz = c.z - player.z, d = Math.hypot(dx, dz), away = Math.atan2(dz, dx), toMe = away + Math.PI;
     if (d > 320 && c.kind !== "moth" && c.kind !== "fish" && rnd() < dt * 0.08) { const i = critters.indexOf(c); critters.splice(i, 1); scene.remove(c.g); spawnCritter(c.kind, true); return; }   /* animals far away wander back into your part of the world */
     c.t -= dt; if (c.cool > 0) c.cool -= dt;
@@ -12614,7 +12975,7 @@ function begin(fresh) { clearHerd(); HERD.cd = 25;
   toast("You hatched!", player.stage === 0 && player.growth < 1 ? "Find food and water to grow. Press H for help." : "Welcome back to the meadow.", 4.5);
   save(); lockMouse();
 }
-const WHO = { lumil: "<b>You are a Lumil.</b> A tiny lantern bat. Jump with <b>Space</b>, then press <b>Space</b> again in the air to fly: hold <b>Space</b> to climb and <b>C</b> to sink. You eat anything: bite small prey or hold <b>E</b> at a glowberry bush. At night, stay still on the ground and your tail lantern glows over your head as a lure. You see in the dark better than anyone.", qyxovluu: "<b>You are a Qyxovluu.</b> A tiny swimmer at home on land and in water. Swim in the river and the sea (hold <b>Space</b> to rise, <b>C</b> to dive) and float on your back when you stop. You eat plants: hold <b>E</b> at a glowberry bush, and prey isn't scared of you. You're small and fragile, so stay near water to escape hunters.", ifidaki: "<b>You are an Ifidaki.</b> A huge hawk-winged hunter. Jump with <b>Space</b>, then press <b>Space</b> again in the air to fly: hold <b>Space</b> to climb and <b>C</b> to sink. Click prey to strike and hold <b>E</b> to eat. Your six eyes see well at night.", ypyci: "<b>You are a Ypyci.</b> You live on sunlight, not food: in daylight your <b>Sunlight</b> bar fills, fastest when you sunbathe with <b>U</b> (your leaves glow). At night and in burrows it slowly drains. You still need to drink. Quick on your feet, so run from hunters.", ylixilb: "<b>You are a Ylixilb.</b> A colossal dark deer. Eat berries from bushes, or click prey to bite it with your fangs and hold <b>E</b> to eat. Your bite is the strongest in the world, but you are slow. You are too big for burrows: sleep out in the open.", yuibic: "<b>You are a Yuibic.</b> A star salamander, at home on land and in water. Swim in the river and the sea (hold <b>Space</b> to rise, <b>C</b> to dive) and hunt small prey.", vrikuu: "<b>You are a Vrikuu.</b> A bamboo stick bug that lives on sunlight, not food: stand in daylight to fill your <b>Sunlight</b> bar. Very fast, and you can run straight up trees.", vaygiu: "<b>You are a Vaygiu.</b> A reef-backed eel whale. In daylight your coral drinks sunlight, and you also hunt: attack to make your anemones sting. Swim in the river and the sea (hold <b>Space</b> to rise, <b>C</b> to dive).", gyura: "<b>You are a Gyura.</b> A frost grazer that eats plants: hold <b>E</b> at a glowberry bush to eat, and prey isn't scared of you. You're one of the fastest runners, so gallop away from hunters.",
+const WHO = { yxae: "<b>You are a Yxae.</b> A sweet-looking deer that hunts. Press <b>Q</b> to Bloom: your face opens into a flower jaw and prey close in front of you freezes for a few seconds. Then click to bite and hold <b>E</b> to eat. Bloom needs time to recharge. You're fast, so chase down what you can't freeze.", lumil: "<b>You are a Lumil.</b> A tiny lantern bat. Jump with <b>Space</b>, then press <b>Space</b> again in the air to fly: hold <b>Space</b> to climb and <b>C</b> to sink. You eat anything: bite small prey or hold <b>E</b> at a glowberry bush. At night, stay still on the ground and your tail lantern glows over your head as a lure. You see in the dark better than anyone.", qyxovluu: "<b>You are a Qyxovluu.</b> A tiny swimmer at home on land and in water. Swim in the river and the sea (hold <b>Space</b> to rise, <b>C</b> to dive) and float on your back when you stop. You eat plants: hold <b>E</b> at a glowberry bush, and prey isn't scared of you. You're small and fragile, so stay near water to escape hunters.", ifidaki: "<b>You are an Ifidaki.</b> A huge hawk-winged hunter. Jump with <b>Space</b>, then press <b>Space</b> again in the air to fly: hold <b>Space</b> to climb and <b>C</b> to sink. Click prey to strike and hold <b>E</b> to eat. Your six eyes see well at night.", ypyci: "<b>You are a Ypyci.</b> You live on sunlight, not food: in daylight your <b>Sunlight</b> bar fills, fastest when you sunbathe with <b>U</b> (your leaves glow). At night and in burrows it slowly drains. You still need to drink. Quick on your feet, so run from hunters.", ylixilb: "<b>You are a Ylixilb.</b> A colossal dark deer. Eat berries from bushes, or click prey to bite it with your fangs and hold <b>E</b> to eat. Your bite is the strongest in the world, but you are slow. You are too big for burrows: sleep out in the open.", yuibic: "<b>You are a Yuibic.</b> A star salamander, at home on land and in water. Swim in the river and the sea (hold <b>Space</b> to rise, <b>C</b> to dive) and hunt small prey.", vrikuu: "<b>You are a Vrikuu.</b> A bamboo stick bug that lives on sunlight, not food: stand in daylight to fill your <b>Sunlight</b> bar. Very fast, and you can run straight up trees.", vaygiu: "<b>You are a Vaygiu.</b> A reef-backed eel whale. In daylight your coral drinks sunlight, and you also hunt: attack to make your anemones sting. Swim in the river and the sea (hold <b>Space</b> to rise, <b>C</b> to dive).", gyura: "<b>You are a Gyura.</b> A frost grazer that eats plants: hold <b>E</b> at a glowberry bush to eat, and prey isn't scared of you. You're one of the fastest runners, so gallop away from hunters.",
   lykuu: "<b>You are a Lykuu.</b> A fluffy moth that eats plants: hold <b>E</b> at a glowberry bush to eat. Jump and press <b>Space</b> in the air to fly, <b>C</b> to sink.",
   viluv: "<b>You are a Viluv.</b> A starry panther that hunts. Stand still for a few seconds and you fade almost invisible, then pounce with <b>Click</b> for a 1.5x bite.",
   uqisa: "<b>You are an Uqisa.</b> A scaled seal-otter. Swim in the river and the sea (hold <b>Space</b> to rise, <b>C</b> to dive) and hunt. Your <b>Wetness</b> drops on land, so don't stay out of the water too long.",
@@ -12626,7 +12987,7 @@ const WHO = { lumil: "<b>You are a Lumil.</b> A tiny lantern bat. Jump with <b>S
   pib: "<b>You are a Pibujwed.</b> A colossal giant that lives on sunlight and meat. In daylight your <b>Food</b> bar fills, fastest when you sunbathe with <b>U</b>. Lure prey with your glowing tail and click to strike, then hold <b>E</b> to eat. You are slow but almost nothing can hurt you. You are too big for burrows: sleep out in the open.",
   byvei: "<b>You are a Byvei.</b> A fluffy otter-creature that is at home on land and in water. Swim in the river and the sea (hold <b>Space</b> to rise, <b>C</b> to dive), and walk on land as fast as anyone. You eat anything: hunt prey (click to bite, hold <b>E</b> to eat) or hold <b>E</b> at a glowberry bush.",
   exil: "<b>You are an Exiliel.</b> A fallen sea angel. You hatch in the river: swim with <b>WASD</b>, hold <b>Space</b> to rise and <b>C</b> to dive, and swim out into the Glimmer Sea. Your <b>Wetness</b> bar fills in water and drains on land, where you can only wriggle slowly, so don't stay out long. You hunt: click to strike with your barbed tentacles, then hold <b>E</b> to eat." , afyx: "<b>Afyx:</b> the biggest creature, a living aurora. Jump and press Space to fly; hold Space to rise and C to sink. It eats fruit from bushes (hold E), so prey isn't scared of it. Very tough but slow, and it floats low over the ground because it has no legs."};
-const KEYS = { lumil: " <b>Space</b> in air: fly", qyxovluu: " <b>Space/C</b> in water: rise/dive", ifidaki: " <b>Space</b> in air: fly", ypyci: "", ylixilb: "", yuibic: " <b>Space/C</b> in water: rise/dive", vrikuu: " run at a tree: climb", vaygiu: " <b>Space/C</b> in water: rise/dive", gyura: "", lykuu: " <b>Space</b> in air: fly", viluv: " stand still: fade", uqisa: " <b>Space/C</b> in water: rise/dive", ulysiqa: " <b>Space</b> in air: fly", vesper: "", ember: " <b>Space</b> in air: fly, walk into trees: climb", murk: " <b>Q</b> melt into ground", solv: " <b>Space</b> in air: glide", exil: " <b>Space/C</b> in water: rise/dive", pib: " <b>U</b> sunbathe", afyx: " <b>Space</b> in air: fly", byvei: " <b>Space/C</b> in water: rise/dive" };
+const KEYS = { yxae: " <b>Q</b> Bloom: freeze prey", lumil: " <b>Space</b> in air: fly", qyxovluu: " <b>Space/C</b> in water: rise/dive", ifidaki: " <b>Space</b> in air: fly", ypyci: "", ylixilb: "", yuibic: " <b>Space/C</b> in water: rise/dive", vrikuu: " run at a tree: climb", vaygiu: " <b>Space/C</b> in water: rise/dive", gyura: "", lykuu: " <b>Space</b> in air: fly", viluv: " stand still: fade", uqisa: " <b>Space/C</b> in water: rise/dive", ulysiqa: " <b>Space</b> in air: fly", vesper: "", ember: " <b>Space</b> in air: fly, walk into trees: climb", murk: " <b>Q</b> melt into ground", solv: " <b>Space</b> in air: glide", exil: " <b>Space/C</b> in water: rise/dive", pib: " <b>U</b> sunbathe", afyx: " <b>Space</b> in air: fly", byvei: " <b>Space/C</b> in water: rise/dive" };
 for (const k in KEYS) if (CREATURES[k] && CREATURES[k].sun && !/sunbathe/.test(KEYS[k])) KEYS[k] += " <b>U</b> sunbathe";   /* Petra: show how sunlight-eaters sunbathe */
 function applyKindUI() { $("helpWho").innerHTML = WHO[KIND]; $("keys").innerHTML = '<b>WASD</b>move <b>Shift</b>run <b>C</b>sneak <b>Space</b>jump <b>Click</b>' + (CR().pounce ? 'pounce' : 'attack') + ' <b>E</b>eat/drink <b>F</b>carry <b>Z</b>sleep <b>X</b>sit' + KEYS[KIND] + ' <b>M</b>map <b>B</b>egg <b>V</b>call <b>P</b>play together <b>Enter</b>chat <b>J</b>journal <b>H</b>help'; }
 function placeFromSave() { { let sy = 1e9; try { sy = JSON.parse(localStorage.getItem(SAVE_KEY)).y ?? 1e9; } catch (e) {} const a = burrowAt(player.x, player.z, sy + 0.3); player.y = a ? a.fl : H(player.x, player.z); if (player.home != null && !burrows[player.home]) player.home = null; if (a && burrowSDF(a.b, player.x, player.y + 0.3, player.z, H(player.x, player.z)) > 0) player.y = H(player.x, player.z); } }   // old saves: burrows have moved
@@ -12638,14 +12999,14 @@ function readSlot(n) { try { return JSON.parse(localStorage.getItem(slotKey(n)) 
 function useSlot(n, kind) { SLOT = n; setKind(kind); SAVE_KEY = slotKey(n);
   Object.assign(player, { x: 20, z: RZ(20) + (CR().swim ? 0 : 22), face: -1.2, stage: 0, growth: 0, food: 80, water: 75, hp: 0, bed: null, home: null, look: { c: 0, p: 0 }, sex: "f", nestMat: 0, baby: null, babyHint: false }); tod = 0.79;
   resumed = load(); setStage(player.stage); if (!resumed) player.hp = maxHp(); placeFromSave(); applyKindUI(); }
-const SAY = { lumil: "LOO-mil", qyxovluu: "kix-OHV-loo", ifidaki: "ih-FID-ah-kee", ypyci: "IP-ih-see", ylixilb: "YIL-ix-ilb", yuibic: "YOO-ih-bik", vrikuu: "VREE-koo", vaygiu: "VAY-gee-oo", gyura: "GHEE-oo-rah", lykuu: "LE-koo", viluv: "VIL-uv", uqisa: "oo-KEE-sah", ulysiqa: "oo-lih-SEE-kah", vesper: "SIH-bur-ray", ember: "KE-bee", murk: "deh-JINK", solv: "vee-BOH-fee", exil: "ex-ILL-ee-el", afyx: "A-fix", byvei: "bih-VAY", pib: "pih-BOOJ-wed" };   /* Petra: show how to say every name */
-const SPD = { lumil: "Fast flyer, slow walker", qyxovluu: "Fast swimmer, slow on land", ifidaki: "Huge, fast flyer", ypyci: "Quick runner", ylixilb: "Slow giant", yuibic: "Quick swimmer", vrikuu: "Very fast runner", vaygiu: "Strong swimmer, slow on land", gyura: "Very fast runner", lykuu: "Gentle flyer", viluv: "Fast hunter", uqisa: "Fast swimmer", ulysiqa: "Slow, floaty flyer", afyx: "Slow, huge flyer", vesper: "Fast runner", ember: "Fastest flyer", murk: "Quick", solv: "Fastest runner", exil: "Fast swimmer", byvei: "Fast swimmer, quick runner", pib: "Very slow giant" };
+const SAY = { yxae: "IK-say", lumil: "LOO-mil", qyxovluu: "kix-OHV-loo", ifidaki: "ih-FID-ah-kee", ypyci: "IP-ih-see", ylixilb: "YIL-ix-ilb", yuibic: "YOO-ih-bik", vrikuu: "VREE-koo", vaygiu: "VAY-gee-oo", gyura: "GHEE-oo-rah", lykuu: "LE-koo", viluv: "VIL-uv", uqisa: "oo-KEE-sah", ulysiqa: "oo-lih-SEE-kah", vesper: "SIH-bur-ray", ember: "KE-bee", murk: "deh-JINK", solv: "vee-BOH-fee", exil: "ex-ILL-ee-el", afyx: "A-fix", byvei: "bih-VAY", pib: "pih-BOOJ-wed" };   /* Petra: show how to say every name */
+const SPD = { yxae: "Fast hunter", lumil: "Fast flyer, slow walker", qyxovluu: "Fast swimmer, slow on land", ifidaki: "Huge, fast flyer", ypyci: "Quick runner", ylixilb: "Slow giant", yuibic: "Quick swimmer", vrikuu: "Very fast runner", vaygiu: "Strong swimmer, slow on land", gyura: "Very fast runner", lykuu: "Gentle flyer", viluv: "Fast hunter", uqisa: "Fast swimmer", ulysiqa: "Slow, floaty flyer", afyx: "Slow, huge flyer", vesper: "Fast runner", ember: "Fastest flyer", murk: "Quick", solv: "Fastest runner", exil: "Fast swimmer", byvei: "Fast swimmer, quick runner", pib: "Very slow giant" };
 let delArm = -1;
 /* ---------- egg shop (Petra): eggs by group, not rarity; better groups cost more. Sibure and Vibofi are free. ---------- */
 const FREE = ["vesper", "solv"];
 const EGGS = [
   { id: "herb", name: "Herbivore egg", price: 300, kinds: ["ember", "gyura", "lykuu", "ylixilb", "qyxovluu"], col: "#8fd17a" },
-  { id: "carn", name: "Carnivore egg", price: 450, kinds: ["murk", "exil", "viluv", "uqisa", "yuibic", "ylixilb", "ifidaki", "lumil"], col: "#d9655b" },
+  { id: "carn", name: "Carnivore egg", price: 450, kinds: ["murk", "exil", "viluv", "uqisa", "yuibic", "ylixilb", "ifidaki", "lumil", "yxae"], col: "#d9655b" },
   { id: "swim", name: "Swimmer egg", price: 600, kinds: ["exil", "byvei", "uqisa", "yuibic", "vaygiu", "qyxovluu"], col: "#4fb3c9" },
   { id: "fly", name: "Flyer egg", price: 900, kinds: ["ember", "afyx", "lykuu", "ulysiqa", "ifidaki", "lumil"], col: "#c7a8ff" },
   { id: "photo", name: "Photovore egg", price: 1000, kinds: ["pib", "ulysiqa", "vrikuu", "vaygiu", "ypyci"], col: "#ffd76a" } ];
@@ -12687,6 +13048,7 @@ const META = {
   ypyci: { diet: "Sunlight", hab: "Land", traits: ["Sun feeding"] },
   qyxovluu: { diet: "Plants", hab: "Semi-aquatic", traits: ["Semi-aquatic"] },
   lumil: { diet: "Omnivore", hab: "Flyer", traits: ["Fly", "Omnivore"] },
+  yxae: { diet: "Meat", hab: "Land", traits: ["Bloom", "Fast runner"] },
   solv:   { diet: "Sunlight", hab: "Land",    traits: ["Glide", "Sun feeding"] },
   byvei:  { diet: "Omnivore", hab: "Semi-aquatic", traits: ["Semi-aquatic", "Omnivore"] },
   ember:  { diet: "Plants",   hab: "Flyer",   traits: ["Fly", "Wall walking"] },
@@ -12703,7 +13065,7 @@ const META = {
   yuibic: { diet: "Meat",     hab: "Semi-aquatic", traits: ["Semi-aquatic"] },
   vrikuu: { diet: "Sunlight", hab: "Land",    traits: ["Fast runner", "Wall walking", "Sun feeding"] },
   vaygiu: { diet: "Photo-carnivore", hab: "Aquatic", traits: ["Swim", "Sun feeding", "Hunts"] } };
-const TRAIT_INFO = { "Fast runner": "Gallops faster than almost anything.", "Fade": "Stand still for a few seconds and the body fades almost invisible, only the stars and eyes stay.", "Hunts": "Also hunts prey and eats meat.", "Colossal": "Enormous health and damage, very slow, steps over trees, too big for burrows.", "Semi-aquatic": "Swims fast underwater and walks well on land. Never dries out.", "Omnivore": "Eats anything: hunt prey or pick glowberries (hold E at a bush).", "Glide": "Can't climb, but sinks slowly and travels far from high ground.", "Sun feeding": "Eats sunlight instead of food.", "Fly": "Free flight: Space to climb, C to sink.", "Swim": "Fast underwater, slow on land, dries out out of water.", "Tentacle strike": "Barbed tentacles shoot out on every attack.", "Melt into ground": "Slides hidden under the ground, then bursts up to attack.", "Night armor": "Takes less damage at night.", "Pounce": "A leaping attack that hits 1.5x harder than a bite.", "Wall walking": "Walks straight up tree trunks and around them. Jump off with Space." };
+const TRAIT_INFO = { "Fast runner": "Gallops faster than almost anything.", "Bloom": "Press Q: the face opens into a flower jaw and prey close in front freezes for a few seconds. Recharges in 12 seconds.", "Fade": "Stand still for a few seconds and the body fades almost invisible, only the stars and eyes stay.", "Hunts": "Also hunts prey and eats meat.", "Colossal": "Enormous health and damage, very slow, steps over trees, too big for burrows.", "Semi-aquatic": "Swims fast underwater and walks well on land. Never dries out.", "Omnivore": "Eats anything: hunt prey or pick glowberries (hold E at a bush).", "Glide": "Can't climb, but sinks slowly and travels far from high ground.", "Sun feeding": "Eats sunlight instead of food.", "Fly": "Free flight: Space to climb, C to sink.", "Swim": "Fast underwater, slow on land, dries out out of water.", "Tentacle strike": "Barbed tentacles shoot out on every attack.", "Melt into ground": "Slides hidden under the ground, then bursts up to attack.", "Night armor": "Takes less damage at night.", "Pounce": "A leaping attack that hits 1.5x harder than a bite.", "Wall walking": "Walks straight up tree trunks and around them. Jump off with Space." };
 const THUMB = {};
 let thumbR = null;
 function thumbOf(k) { if (THUMB[k] !== undefined) return THUMB[k];
