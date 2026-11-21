@@ -215,6 +215,109 @@ body { background: #12142a; color: var(--ink); font-family: var(--body); overflo
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
 (function () {
+/* ===== NEW FUR (Petra 2026-11-21): "tuft fur", made the same way as the masked fox's fluffy feathers. It replaces all the old shell fur.
+   Each tuft is a soft LOCK of fur: 3 strands that start together, swell apart in the middle and come back to a wispy point, rising off the
+   skin and curling back down at the tip. Thousands of them are spread evenly over each furry part as ONE InstancedMesh per layer, combed
+   back and down, coloured from the part's own colours (and spots), with lighter tips and a soft fuzzy glow at the edges.
+   Thicker fur = more layers (1 short, 2 normal, 3 thick). Tufts follow parts that bend or are rebuilt every frame. ===== */
+const TUFT_ON = !/[?&]oldfur/.test(location.search);   /* ?oldfur shows the old shell fur, to compare */
+const TUFT_CUR = { v: null };   /* per-creature fur style while it is built / updated (Petra: smoother or shorter on some) */
+const TUFT = (() => {
+  const V3 = THREE.Vector3;
+  const geo = (() => { const pos = [], col = [], tw = [], idx = [], NL = 4;
+    [[-1, 0.84], [0, 1], [1, 0.9]].forEach(([s, len]) => { const b = pos.length / 3;   /* Petra v5: fluffier, not wet: strands fan apart, stay apart at the tips and don't stick down to the skin */
+      for (let i = 0; i <= NL; i++) { const v = i / NL, cx = s * (0.05 + 0.2 * Math.pow(v, 0.75) * (1 - 0.2 * v)) + 0.03 * Math.sin(Math.PI * v * 1.6),
+          w = 0.135 * Math.pow(Math.sin(Math.PI * Math.min(1, 0.12 + v * 0.92)), 0.6) * (1 - 0.2 * v), y = v * len, zc = (0.32 * v - 0.26 * v * v) * len + 0.05 * Math.abs(s) * v;
+        [-1, 0, 1].forEach(u => { pos.push(cx + u * w, y, zc + (u === 0 ? 0.04 * (1 - v * 0.7) : 0)); const sh = 0.6 + 0.4 * Math.pow(v, 0.8) + (u === 0 ? 0.03 : -0.05) - 0.04 * Math.abs(s) * (1 - v); col.push(sh, sh, sh); tw.push(v); }); }
+      for (let i = 0; i < NL; i++) for (let j = 0; j < 2; j++) { const a = b + i * 3 + j, c = a + 3; idx.push(a, c, a + 1, c, c + 1, a + 1); } });
+    const g = new THREE.BufferGeometry(); g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute("color", new THREE.Float32BufferAttribute(col, 3));
+    g.setAttribute("tw", new THREE.Float32BufferAttribute(tw, 1)); g.setIndex(idx); g.computeVertexNormals(); return g; })();
+  const wind = { value: 0 };
+  /* one material per layer (so each creature's colour picker patches its own), all sharing one shader program */
+  const mat = (o, glowing) => { const m = new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide, roughness: 0.93 }), st = o.style || TUFT_CUR.v, tipMul = st && st.tipMul != null ? st.tipMul : 1;
+    const U = { uTip: { value: new THREE.Color(o.tip || "#ffffff").convertSRGBToLinear() }, uTipK: { value: o.tip ? (o.tipK ?? 0.4) * tipMul : 0 }, uWindT: wind, uRim: { value: 0.42 * tipMul }, uRootK: { value: tipMul }, uGlowC: { value: new THREE.Color(o.spotCol || "#ffffff").convertSRGBToLinear() }, uGlowK: { value: glowing ? (o.glow || 0) : 0 } };
+    m.onBeforeCompile = sh => { Object.assign(sh.uniforms, U);
+      sh.vertexShader = "attribute float tw; attribute float aGlow; varying float vTw, vGl; uniform float uWindT, uRootK;\n" + sh.vertexShader.replace("#include <begin_vertex>", "#include <begin_vertex>\n vTw = tw; vGl = aGlow;\n#ifdef USE_INSTANCING\n transformed.z += sin(uWindT * 2.1 + instanceMatrix[3].x * 37.0 + instanceMatrix[3].y * 29.0 + instanceMatrix[3].z * 23.0) * tw * tw * 0.07;\n#endif");
+      sh.fragmentShader = "varying float vTw, vGl; uniform vec3 uTip, uGlowC; uniform float uTipK, uGlowK, uRim, uRootK;\n" + sh.fragmentShader.replace("#include <color_fragment>", "#include <color_fragment>\n diffuseColor.rgb = mix(diffuseColor.rgb, uTip, vTw * vTw * uTipK); diffuseColor.rgb *= mix(1.0, 0.82, (1.0 - uRootK) * vTw);")
+        .replace("#include <emissivemap_fragment>", "#include <emissivemap_fragment>\n { float fr = 1.0 - abs(dot(normalize(normal), normalize(vViewPosition))); totalEmissiveRadiance += diffuseColor.rgb * fr * fr * vTw * uRim + uGlowC * vGl * uGlowK; }"); };
+    m.customProgramCacheKey = () => "tuft3"; return m; };
+  /* pixels of a canvas texture (skins, spot maps), read once */
+  const pixCache = new WeakMap();
+  const pix = tex => { const im = tex && tex.image; if (!im || !im.width) return null; if (pixCache.has(im)) return pixCache.get(im);
+    let d = null; try { let c = im; if (!c.getContext) { c = document.createElement("canvas"); c.width = im.width; c.height = im.height; c.getContext("2d").drawImage(im, 0, 0); } d = { w: c.width, h: c.height, a: c.getContext("2d").getImageData(0, 0, c.width, c.height).data }; } catch (e) { d = null; }
+    pixCache.set(im, d); return d; };
+  const at = (d, u, v, ch) => { u = u - Math.floor(u); v = v - Math.floor(v); const x = Math.min(d.w - 1, Math.floor(u * d.w)), y = Math.min(d.h - 1, Math.floor((1 - v) * d.h)); return d.a[(y * d.w + x) * 4 + ch] / 255; };
+  /* even spread (area weighted, then thinned so no two roots are closer than r), cached per mesh shape so parts rebuilt every frame keep their tufts */
+  const cache = new Map(); let seedN = 0;
+  const area = g => { const P = g.attributes.position, I = g.index, nT = I ? I.count / 3 : P.count / 3, a = new V3(), b = new V3(), c = new V3(); let tot = 0;
+    for (let t = 0; t < nT; t++) { a.fromBufferAttribute(P, I ? I.getX(t * 3) : t * 3); b.fromBufferAttribute(P, I ? I.getX(t * 3 + 1) : t * 3 + 1); c.fromBufferAttribute(P, I ? I.getX(t * 3 + 2) : t * 3 + 2); tot += b.sub(a).cross(c.sub(a)).length() * 0.5; } return tot; };
+  const samples = (g, r, seed, want) => { const P = g.attributes.position, I = g.index, nT = I ? I.count / 3 : P.count / 3, key = P.count + ":" + nT + ":" + r.toFixed(5) + ":" + seed + ":" + (g.index ? g.index.count : 0);
+    if (cache.has(key)) return cache.get(key);
+    const vi = k => I ? I.getX(k) : k, A = new Float32Array(nT), a = new V3(), b = new V3(), c = new V3(); let tot = 0;
+    for (let t = 0; t < nT; t++) { a.fromBufferAttribute(P, vi(t * 3)); b.fromBufferAttribute(P, vi(t * 3 + 1)); c.fromBufferAttribute(P, vi(t * 3 + 2)); tot += b.sub(a).cross(c.sub(a)).length() * 0.5; A[t] = tot; }
+    let s = seed * 9973 + 7; const R = () => { s = (s * 16807) % 2147483647; return (s - 1) / 2147483646; };
+    const out = [], grid = new Map(), cell = k => Math.floor(k / r), tries = want * 4;
+    for (let n = 0; n < tries && out.length < want && tot > 0; n++) { const x = R() * tot; let lo = 0, hi = nT - 1; while (lo < hi) { const m = (lo + hi) >> 1; if (A[m] < x) lo = m + 1; else hi = m; }
+      let u = R(), v = R(); if (u + v > 1) { u = 1 - u; v = 1 - v; } const i0 = vi(lo * 3), i1 = vi(lo * 3 + 1), i2 = vi(lo * 3 + 2), w = 1 - u - v;
+      const px = P.getX(i0) * w + P.getX(i1) * u + P.getX(i2) * v, py = P.getY(i0) * w + P.getY(i1) * u + P.getY(i2) * v, pz = P.getZ(i0) * w + P.getZ(i1) * u + P.getZ(i2) * v;
+      const cx = cell(px), cy = cell(py), cz = cell(pz); let ok = true;
+      for (let dx = -1; dx <= 1 && ok; dx++) for (let dy = -1; dy <= 1 && ok; dy++) for (let dz = -1; dz <= 1 && ok; dz++) { const L = grid.get((cx + dx) + "," + (cy + dy) + "," + (cz + dz)); if (L) for (const q of L) if ((q[0] - px) ** 2 + (q[1] - py) ** 2 + (q[2] - pz) ** 2 < r * r) { ok = false; break; } }
+      if (!ok) continue; const kk = cx + "," + cy + "," + cz; if (!grid.has(kk)) grid.set(kk, []); grid.get(kk).push([px, py, pz]);
+      out.push({ i0, i1, i2, w, u, v, j: R(), j2: R(), j3: R() }); }
+    if (cache.size > 400) cache.clear(); cache.set(key, out); return out; };
+  const _m = new THREE.Matrix4(), _x = new V3(), _y = new V3(), _z = new V3(), p = new V3(), n = new V3(), t = new V3(), q = new V3(), e1 = new V3(), e2 = new V3(), col = new THREE.Color();
+  const bary = (A, s, ch) => ch === 0 ? A.getX(s.i0) * s.w + A.getX(s.i1) * s.u + A.getX(s.i2) * s.v : ch === 1 ? A.getY(s.i0) * s.w + A.getY(s.i1) * s.u + A.getY(s.i2) * s.v : A.getZ(s.i0) * s.w + A.getZ(s.i1) * s.u + A.getZ(s.i2) * s.v;
+  /* one layer of tufts in the geometry's own space. o: len|tuftLen, gap, lift, flow, seed, dark, tip, tipK, color, map, spot/spotCol/spotS/glow, mul (per-vertex length), skip(x,y,z), cap */
+  function layer(g, o = {}) {
+    const st = o.style || TUFT_CUR.v; let L = (o.tuftLen || Math.min(0.17, Math.max(0.034, (o.len || 0.03) * 2.5))) * (st && st.lenK || 1), gap = (o.gap || 0.42) / Math.sqrt(st && st.lenK || 1), cap = o.cap || 3500;
+    const A0 = area(g); if (A0 / ((L * gap) ** 2) * 1.15 > cap) L = Math.sqrt(A0 * 1.15 / cap) / gap;   /* big parts: bigger tufts, so the count stays sensible */
+    const r = L * gap, want = Math.min(cap, Math.ceil(A0 / (r * r) * 1.15)), seed = o.seed || 1;
+    const S0 = samples(g, r, seed, want), PA = g.attributes.position, M = o.mul;
+    const S = S0.filter(s => { if (M && (M[s.i0] * s.w + M[s.i1] * s.u + M[s.i2] * s.v) < 0.08) return false; if (o.skip && o.skip(bary(PA, s, 0), bary(PA, s, 1), bary(PA, s, 2))) return false; return true; });
+    const spot = o.spot ? pix(o.spot) : null, map = o.map ? pix(o.map) : null, glowing = !!(spot && o.glow);
+    const im = new THREE.InstancedMesh(geo, mat(o, glowing), Math.max(1, S.length)); im.castShadow = false; im.receiveShadow = true; im.frustumCulled = false; im.userData.tufts = S.length;
+    im.count = S.length;
+    const gl = new Float32Array(Math.max(1, S.length)); im.userData.glowAttr = gl;
+    im.material.addEventListener("dispose", () => { if (im.dispose) im.dispose(); if (im.geometry !== geo) im.geometry.dispose(); });   /* parts rebuilt every frame throw their old tufts away */
+    const flow = new V3().fromArray(o.flow || [-0.8, -0.6, 0]).normalize(), lift = st && st.lift != null ? Math.min(st.lift, o.lift ?? 1) : (o.lift ?? 0.46), twist = st && st.twist != null ? st.twist : 1.5, base = o.color ? new THREE.Color(o.color) : new THREE.Color(1, 1, 1), dark = o.dark || 1;
+    const place = (gg, colours) => { const P = gg.attributes.position, N = gg.attributes.normal, C = o.noVC ? null : gg.attributes.color, UV = gg.attributes.uv;
+      S.forEach((s, k) => { p.set(bary(P, s, 0), bary(P, s, 1), bary(P, s, 2)); if (N) n.set(bary(N, s, 0), bary(N, s, 1), bary(N, s, 2)); else n.set(0, 0, 0);
+        if (n.lengthSq() < 1e-8) { e1.fromBufferAttribute(P, s.i1).sub(q.fromBufferAttribute(P, s.i0)); e2.fromBufferAttribute(P, s.i2).sub(q); n.crossVectors(e1, e2); if (n.lengthSq() < 1e-12) n.set(0, 1, 0); }
+        n.normalize(); t.copy(flow).addScaledVector(n, -flow.dot(n)); if (t.lengthSq() < 0.04) { t.set(0, -1, 0).addScaledVector(n, n.y); if (t.lengthSq() < 0.04) t.set(1, 0, 0).addScaledVector(n, -n.x); }
+        t.normalize().applyAxisAngle(n, (s.j - 0.5) * twist);
+        const mk = M ? Math.min(2.2, M[s.i0] * s.w + M[s.i1] * s.u + M[s.i2] * s.v) : 1, d = _y.copy(t).multiplyScalar(1 - lift * 0.5).addScaledVector(n, lift * (0.75 + 0.5 * s.j2)).normalize(), Lk = L * (0.82 + 0.36 * s.j3) * (0.55 + 0.45 * mk);
+        _z.copy(n).addScaledVector(d, -n.dot(d)).normalize(); _x.crossVectors(d, _z); p.addScaledVector(n, -Lk * 0.05);
+        _m.set(_x.x * Lk, d.x * Lk, _z.x * Lk, p.x, _x.y * Lk, d.y * Lk, _z.y * Lk, p.y, _x.z * Lk, d.z * Lk, _z.z * Lk, p.z, 0, 0, 0, 1); im.setMatrixAt(k, _m);
+        if (colours) { col.copy(base); if (C) { col.r *= bary(C, s, 0); col.g *= bary(C, s, 1); col.b *= bary(C, s, 2); }
+          if (UV && (map || spot)) { const u = bary(UV, s, 0), v = bary(UV, s, 1);
+            if (map) col.multiply(new THREE.Color(at(map, u, v, 0), at(map, u, v, 1), at(map, u, v, 2)).convertSRGBToLinear());
+            if (spot) { const sp = at(spot, u * (o.spotS || 1), v, 0); col.lerp(new THREE.Color(o.spotCol || "#ffffff").convertSRGBToLinear(), sp * 0.8); gl[k] = sp; } }
+          col.multiplyScalar((0.9 + 0.2 * s.j2) * dark); im.setColorAt(k, col); } });
+      im.instanceMatrix.needsUpdate = true; if (colours && im.instanceColor) im.instanceColor.needsUpdate = true; };
+    place(g, true); im.geometry = geo.clone(); im.geometry.setAttribute("aGlow", new THREE.InstancedBufferAttribute(gl, 1));
+    /* the clone keeps its own per-instance glow; free it with the mesh */
+    im.userData.place = gg => place(gg, false); im.userData.recolour = gg => place(gg, true);
+    return im; }
+  /* how many layers: thicker fur gets more */
+  const nFor = (len, t1, t2) => len >= t2 ? 3 : len >= t1 ? 2 : 1;
+  function layers(g, o, n) { const out = [layer(g, o)]; const L = o.tuftLen || Math.min(0.17, Math.max(0.034, (o.len || 0.03) * 2.5));
+    if (n >= 2) out.unshift(layer(g, Object.assign({}, o, { tuftLen: L * 0.62, gap: 0.55, lift: 0.14, seed: (o.seed || 1) + 1, dark: (o.dark || 1) * 0.86, tipK: 0.15, cap: (o.cap || 3500) * 0.8 })));
+    if (n >= 3) out.push(layer(g, Object.assign({}, o, { tuftLen: L * 1.3, gap: 0.62, lift: (o.lift ?? 0.26) + 0.08, seed: (o.seed || 1) + 2, cap: (o.cap || 3500) * 0.6 })));
+    return out; }
+  /* drop-in for the old furCoat(geo, o): darker solid undercoat + tuft layers */
+  function coat(g, o = {}) { const grp = new THREE.Group(), um = new THREE.MeshStandardMaterial({ color: new THREE.Color(0.8, 0.8, 0.8), vertexColors: !!g.attributes.color, roughness: 0.95 });
+    const b = new THREE.Mesh(g, um); b.castShadow = true; b.receiveShadow = true; grp.add(b); layers(g, o, o.n || nFor(o.len || 0.03, 0.016, 0.045)).forEach(l => grp.add(l)); grp.userData.wind = () => {}; return grp; }
+  /* drop-in for the old furShells(o): a group whose geometry can be swapped every frame with set(ng) */
+  function shells(o = {}) { const grp = new THREE.Group(), um = new THREE.MeshStandardMaterial({ color: new THREE.Color(0.8, 0.8, 0.8), vertexColors: true, roughness: 0.95 });
+    let geo0 = o.geo || new THREE.BufferGeometry(), ls = null; o = Object.assign({ style: TUFT_CUR.v }, o); const b = new THREE.Mesh(geo0, um); b.castShadow = true; b.receiveShadow = true; b.frustumCulled = false; grp.add(b);
+    const small = !!o.geo, n = o.n || (small ? 1 : nFor(o.len || 0.03, 0.03, 0.07)), mo = Object.assign({ tipK: 0.3 }, o, { tuftLen: o.tuftLen || (small ? Math.min(0.06, Math.max(0.025, (o.len || 0.03) * 1.4)) : Math.min(0.2, Math.max(0.04, (o.len || 0.03) * 2.2))) });   /* ears and other small fixed parts: one layer of fine tufts */
+    const build = gg => { if (!gg.attributes.position || !gg.attributes.position.count) return; if (!gg.attributes.normal) gg.computeVertexNormals(); ls = layers(gg, mo, n); ls.forEach(l => grp.add(l)); };
+    if (o.geo) build(geo0);
+    grp.userData.set = ng => { if (geo0 && geo0 !== ng) geo0.dispose(); geo0 = ng; b.geometry = ng; if (!ls) build(ng); else ls.forEach(l => l.userData.place(ng)); };
+    return grp; }
+  return { geo, layer, layers, coat, shells, nFor, pix, tick: tm => { wind.value = tm; } };
+})();
+
 const V = THREE.Vector3;
 const PAL = {
   Normal:  { top: "#8e1912", side: "#d4401c", belly: "#f2b65c", glow: "#ff7a1c", horn: "#f1ddb2", wing: "#7c1610", eye: "#ffd23a", metal: 0.05 },
@@ -1691,7 +1794,7 @@ const sn = x => 0.1 + (x - 0.1) * SX;   // stretch or squash the snout
     if (o.foxEars) {   // NEW: tall pointy fox ears, white fur inside, dark tips
       const ear = new THREE.Group(); ear.position.set(-0.12, 0.13, 0.13 * z); ear.rotation.set(0.2 * z, -0.25 * z, 0.18); { const es = o.earScale || 1.4; ear.scale.set(es, es * 1.25, es); } head.add(ear);   // taller so the tip stays as high as before; root sunk into the skull so it grows out of the head (Petra: ears looked stuck on)
       const earM = p.earColor ? new THREE.MeshStandardMaterial({ color: new THREE.Color(p.earColor).convertSRGBToLinear(), roughness: 0.8 }) : M.top;
-      if (typeof realEar === "function") { ear.rotation.set(0, 0, 0); ear.scale.setScalar(o.earScale || 1.4); ear.position.set(-0.13, 0.15, 0.12 * z); ear.add(realEar(z, earM.color, "#f2e6cf", new THREE.Color(0.02, 0.015, 0.01), 0.32, { fox: true, L: 0.5, W: 0.24, out: 0.35, back: 0.15 }));   /* Petra: fox-shaped ears */ } else {
+      if (typeof realEar === "function") { ear.rotation.set(0, 0, 0); ear.scale.setScalar(o.earScale || 1.4); ear.position.set(-0.13, 0.15, 0.12 * z); if (o.earSink) { ear.position.set(-0.1, 0.07, 0.11 * z); const md = new THREE.Mesh(new THREE.SphereGeometry(0.12, 18, 12), earM); md.scale.set(1.0, 0.55, 0.85); md.position.set(-0.11, 0.08, 0.1 * z); md.userData.furEar = true; head.add(md); }   /* Petra: Sibure ears grow out of the head: base sunk into the skull with a furry mound round it */ ear.add(realEar(z, earM.color, "#f2e6cf", new THREE.Color(0.02, 0.015, 0.01), 0.32, { fox: true, L: 0.5, W: 0.24, out: 0.35, back: 0.15 }));   /* Petra: fox-shaped ears */ } else {
       const outer = new THREE.Mesh(new THREE.ConeGeometry(0.13, 0.3, 18, 1, true), earM); outer.scale.set(1, 1, 0.6); outer.position.y = 0.15; outer.castShadow = true; ear.add(outer);
       const root = new THREE.Mesh(new THREE.SphereGeometry(0.13, 18, 12), earM); root.scale.set(1, 0.55, 0.6); root.position.y = 0.02; ear.add(root);   // rounded base that blends the ear into the head
       const inner = new THREE.Mesh(new THREE.ConeGeometry(0.085, 0.2, 14), p.earInner ? new THREE.MeshStandardMaterial({ color: new THREE.Color(p.earInner).convertSRGBToLinear(), roughness: 0.9 }) : M.fur); inner.scale.set(1, 1, 0.3); inner.position.set(0.042, 0.115, 0); ear.add(inner);   // inside of the ear faces forward
@@ -4751,6 +4854,20 @@ float furH(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
   // ----- one fur stack for one mesh -----
   function furFor(src, kind, nShells, mulFn) {
     const g0 = src.geometry, tube = !!(g0.userData && g0.userData.radial);
+    if (TUFT_ON) { if (!g0.attributes.position || !g0.attributes.normal) return;   /* NEW FUR (Petra 2026-11-21): tufts, thicker fur = more layers */
+      const n0 = g0.attributes.position.count, uv = g0.attributes.uv, mul = new Float32Array(n0);
+      const fillMul = () => { for (let i = 0; i < n0; i++) mul[i] = (mulFn && uv ? mulFn(uv.getX(i), uv.getY(i), i) : 1) * (O.patches && uv ? patchK(uv.getX(i), uv.getY(i), tube) : 1); };   /* after the first pose: ring sizes are real by then */
+      const sMat = Array.isArray(src.material) ? src.material[0] : src.material, len = O.length * (O.partLen[kind] || 1);
+      root.updateMatrixWorld(true); const toLocal = new THREE.Matrix4().copy(src.matrixWorld).invert().multiply(root.matrixWorld), fl = tuftBack.clone().transformDirection(toLocal);
+      const o2 = { style: TUFT_CUR.v, tuftLen: Math.min(0.2, Math.max(0.04, len * 0.95)), flow: [fl.x, fl.y, fl.z], mul, color: sMat.color, map: sMat.map || null, tip: O.tip || "#ffffff", tipK: O.tip ? Math.min(0.6, O.tipK) : O.tipK * 0.5, cap: kind === "body" ? 2200 : kind === "foxTails" ? 1100 : 600, seed: made.length + 1 };
+      if (!sMat.vertexColors) o2.noVC = true;
+      const nL = Math.min(kind === "body" || kind === "foxTails" || kind === "sqTail" ? 3 : 2, TUFT.nFor(len, 0.06, 0.12)), holder = new THREE.Group(); holder.name = "fur:" + kind; src.add(holder); made.push(holder);
+      let ls = null, ver = -1; const build = () => { fillMul(); ls = TUFT.layers(g0, o2, nL); ver = g0.attributes.position.version; ls.forEach(im => { im.onBeforeRender = holder.userData.follow; holder.add(im); }); };
+      /* bending parts (body, tails) are spread out after their first pose, so the neck and tail get their share of tufts */
+      holder.userData.follow = () => { if (!ls) { build(); holder.userData.ready = true; return; } const v = g0.attributes.position.version; if (v !== ver) { ver = v; ls.forEach(l => l.userData.place(g0)); } };
+      if (!tube || !api.update) build();
+      if (!baseMats.has(sMat)) baseMats.set(sMat, { r: sMat.roughness, c: sMat.color.clone() });
+      return; }
     if (!g0.attributes.normal || !g0.attributes.uv) return;
     const geo = new THREE.BufferGeometry();
     for (const k in g0.attributes) geo.setAttribute(k, g0.attributes[k]);   // shared by reference: spine/tail updates show up here
@@ -4815,6 +4932,9 @@ float furH(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
   // ----- find the parts -----
   const isTube = m => m.isMesh && m.geometry && m.geometry.userData && m.geometry.userData.radial;
   const spine = root.children.find(m => isTube(m) && m.geometry.userData.segs >= 100);
+  const tuftBack = new THREE.Vector3(-0.8, -0.6, 0);   /* new fur is combed toward the tail and down: work out which way the tail is */
+  if (spine) { const P = spine.geometry.attributes.position, W = spine.geometry.userData.radial + 1, ring = r => { const c = new THREE.Vector3(); for (let j = 0; j < W - 1; j++) c.add(new THREE.Vector3().fromBufferAttribute(P, r * W + j)); return c.multiplyScalar(1 / (W - 1)).applyMatrix4(spine.matrix); };
+    const segs = spine.geometry.userData.segs, d = ring(Math.round(segs * 0.45)).sub(ring(Math.round(segs * 0.6))); d.y = 0; if (d.lengthSq() > 1e-8) tuftBack.copy(d.normalize().multiplyScalar(0.8)).add(new THREE.Vector3(0, -0.6, 0)).normalize(); }
   if (spine) {
     const P = O.parts, L = O.partLen;
     // u runs tail tip (0) to the base of the head (1): tail < 0.42, body, neck > 0.64
@@ -4875,9 +4995,11 @@ float furH(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
       // under the fur the skin goes matte and a touch darker (the fur's roots)
       baseMats.forEach((v, m) => { m.roughness = fur.enabled ? 0.95 : v.r; m.color.copy(v.c); if (fur.enabled) m.color.multiplyScalar(0.85); });
     },
-    dispose() { fur.setEnabled(false); made.forEach(m => { m.parent && m.parent.remove(m); m.material.dispose(); }); made.length = 0; delete api.fur; }
+    dispose() { fur.setEnabled(false); made.forEach(m => { m.parent && m.parent.remove(m); m.traverse(c => { if (c.material) c.material.dispose(); }); }); made.length = 0; delete api.fur; }
   };
   api.fur = fur; fur.setEnabled(true);
+  if (TUFT_ON && made.length) { const fl = made.filter(m => m.userData.follow); api.root.userData.tuftFollow = () => { if (fur.enabled) fl.forEach(m => m.userData.follow()); };   /* the game calls this after all pose changes, right before drawing */
+    if (api.update) { const up0 = api.update; api.update = (...a) => { const r = up0(...a); if (fur.enabled) fl.forEach(m => m.userData.ready || m.userData.follow()); return r; }; } }
   return fur;
 }
 // per-species fur looks (who gets fur, and how)
@@ -7198,7 +7320,7 @@ const STAGES = [   // babies: big head, big eyes and ears, short snout and neck,
 const VESPER_FUR = FUR_LOOKS.Vulpyre ? Object.assign({}, FUR_LOOKS.Vulpyre, { length: 0.15, density: 64, clump: 0.75, sheen: 0.55, tipK: 0.45, rootDark: 0.7 }) : null;
 function buildVesper(stage) {
   const st = STAGES[stage];
-  const sp = { tier: 5, foxEars: true, gentle: true, foxTails: st.tails, tailSpread: 1.05, tailPhys: true, tailLen: 0.06, glowTips: true, crescent: true, tail: "none", thin: st.thin, legLen: st.legLen, legThick: st.legThick, len: st.len, neck: st.neck, girth: st.girth, earScale: st.ears, feet: st.feet, wings: "none",
+  const sp = { tier: 5, foxEars: true, earSink: true, gentle: true, foxTails: st.tails, tailSpread: 1.05, tailPhys: true, tailLen: 0.06, glowTips: true, crescent: true, tail: "none", thin: st.thin, legLen: st.legLen, legThick: st.legThick, len: st.len, neck: st.neck, girth: st.girth, earScale: st.ears, feet: st.feet, wings: "none",
     noMotes: true, headMarks: true, legMarks: true, foxfire: stage >= 2, horns: "none", back: "none", frill: "none", pattern: "foxfire", glow: st.glow, eyes: st.eyes, whiskers: true, head: st.head };
   if (SEXM()) { sp.girth = (sp.girth || 1) * 1.06; sp.neck = (sp.neck || 1) * 1.04; sp.legThick = (sp.legThick || 1) * 1.05; sp.head = sp.head.map(v => v * 1.03); sp.earScale = (sp.earScale || 1.4) * 1.14; } else { sp.eyes = (sp.eyes || 1) * 1.05; sp.thin = (sp.thin || 1) * 0.98; }   /* males: heavier build and head; females: slimmer, bigger eyes */
   const api = makeDragon(VESPER_PAL, sp);
@@ -8262,7 +8384,9 @@ loft(TP, TP.map((_, i) => 0.09 * (1 - i / 40) ** 0.9 + 0.006), TP.map((_, i) => 
     { const cols = [], hp = o.parent === body ? new V() : o.parent.position; for (let i = 0; i < P.count; i++) { const nx = Nn.getX(i) / sc.x, ny = Nn.getY(i) / sc.y, nz = Nn.getZ(i) / sc.z, l = Math.hypot(nx, ny, nz) || 1;
       const c = furCol(P.getX(i) * sc.x + o.position.x + hp.x, P.getY(i) * sc.y + o.position.y + hp.y, P.getZ(i) * sc.z + o.position.z + hp.z, ny / l); cols.push(c.r, c.g, c.b); }
       o.geometry = o.geometry.clone(); o.geometry.setAttribute("color", new THREE.Float32BufferAttribute(cols, 3)); o.material = skinV; }
-    for (let k = 1; k <= S; k++) { const off = LEN * (o.parent === head ? 0.45 : 1) * Math.pow(k / S, 0.9), g2 = o.geometry.clone(), Q = g2.attributes.position;
+    if (TUFT_ON) { o.updateMatrix(); const gp = o.geometry.clone().applyMatrix4(o.matrix); gp.computeVertexNormals(); const hd = o.parent === head;   /* NEW FUR (Petra 2026-11-21): fluffy tufts, 3 layers on the body, 2 on the head */
+      TUFT.layers(gp, { len: LEN * (hd ? 0.45 : 1), tuftLen: hd ? 0.045 : 0.085, tip: "#5fb8b0", tipK: 0.3, seed: skins.indexOf(o) + 1 }, hd ? 2 : 3).forEach(l => o.parent.add(l)); }
+    else     for (let k = 1; k <= S; k++) { const off = LEN * (o.parent === head ? 0.45 : 1) * Math.pow(k / S, 0.9), g2 = o.geometry.clone(), Q = g2.attributes.position;
       for (let i = 0; i < Q.count; i++) { const nx = Nn.getX(i) / sc.x, ny = Nn.getY(i) / sc.y, nz = Nn.getZ(i) / sc.z, l = Math.hypot(nx, ny, nz) || 1;
         Q.setXYZ(i, P.getX(i) + nx / l * off / sc.x, P.getY(i) + ny / l * off / sc.y - (k / S) ** 2 * 0.012 / sc.y, P.getZ(i) + nz / l * off / sc.z); }   /* tips droop slightly */
       { const cols = [], hp = o.parent === body ? new V() : o.parent.position; for (let i = 0; i < Q.count; i++) { const nx = Nn.getX(i) / sc.x, ny = Nn.getY(i) / sc.y, nz = Nn.getZ(i) / sc.z, l = Math.hypot(nx, ny, nz) || 1;
@@ -8610,7 +8734,7 @@ function furMat(o) { const m = new THREE.MeshStandardMaterial({ color: 0xffffff,
     sh.fragmentShader = "uniform float uK, uTipK; uniform vec2 uRep; uniform sampler2D uNoise; uniform vec3 uTip; varying vec2 vFU;\n" + sh.fragmentShader.replace("#include <color_fragment>", "#include <color_fragment>\n float fn = texture2D(uNoise, vFU * uRep).r; if (uK > 0.01 && fn < uK * 0.92 + 0.04) discard; diffuseColor.rgb *= mix(0.55, 1.05, uK); diffuseColor.rgb = mix(diffuseColor.rgb, uTip, uK * uK * uTipK);"); };
   m.customProgramCacheKey = () => "fur1"; return m; }
 /* geometry -> base mesh plus fur shells, all in one group */
-function furCoat(geo, o) { const g = new THREE.Group(), L = o.layers || 12; for (let i = 0; i <= L; i++) { const m = mk(geo, furMat({ k: i / L, len: o.len, rep: o.rep || [40, 40], tip: o.tip, tipK: o.tipK })); if (i > 0) m.castShadow = false; g.add(m); } g.userData.wind = t => g.children.forEach(m => { m.material.userData.U.uWind.value = t; }); return g; }
+function furCoat(geo, o) { if (TUFT_ON) return TUFT.coat(geo, o); const g = new THREE.Group(), L = o.layers || 12; for (let i = 0; i <= L; i++) { const m = mk(geo, furMat({ k: i / L, len: o.len, rep: o.rep || [40, 40], tip: o.tip, tipK: o.tipK })); if (i > 0) m.castShadow = false; g.add(m); } g.userData.wind = t => g.children.forEach(m => { m.material.userData.U.uWind.value = t; }); return g; }
 function glassMat(c, op = 0.35, em = 0.25) { return new THREE.MeshPhysicalMaterial({ color: lin(c), emissive: lin(c), emissiveIntensity: em, roughness: 0.08, metalness: 0, clearcoat: 1, clearcoatRoughness: 0.1, transparent: true, opacity: op, side: THREE.DoubleSide, depthWrite: false }); }
 function glowMat(c, k = 1.6) { return new THREE.MeshStandardMaterial({ color: lin(c), emissive: lin(c), emissiveIntensity: k, roughness: 0.4 }); }
 function haloSprite(c, s, op = 0.6) { const cv = cnv(64, 64), g = cv.getContext("2d"), gr = g.createRadialGradient(32, 32, 0, 32, 32, 32); gr.addColorStop(0, "rgba(255,255,255,1)"); gr.addColorStop(0.35, "rgba(255,255,255,0.45)"); gr.addColorStop(1, "rgba(255,255,255,0)"); g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
@@ -8631,7 +8755,7 @@ function ribbonTex(c1, c2, edge) { const c = cnv(256, 64), g = c.getContext("2d"
 function legChain(parent, lens, rads, mat, o = {}) { const piv = []; let p = parent;
   lens.forEach((L, i) => { const q = new THREE.Group(); if (i > 0) q.position.y = -lens[i - 1]; p.add(q); piv.push(q);
     const r0 = rads[i], r1 = rads[i + 1] ?? rads[i] * 0.8, pts = [new V(0, 0, 0), new V(0, -L * 0.5, 0), new V(0, -L, 0)];
-    const g = tubeGeo(pts, [r0, (r0 + r1) / 2 * (o.bulge ? 1.12 : 1), r1], { sg: 12, cap: true, colFn: o.colFn ? (f, a) => o.colFn((i + f) / lens.length, a) : null }); const m = o.fur ? furCoat(g, o.fur) : mk(g, mat); q.add(m);
+    const g = tubeGeo(pts, [r0, (r0 + r1) / 2 * (o.bulge ? 1.12 : 1), r1], { sg: 12, cap: true, colFn: o.colFn ? (f, a) => o.colFn((i + f) / lens.length, a) : null }); const m = o.fur ? furCoat(g, Object.assign({ flow: [0.2, -1, 0] }, o.fur)) : mk(g, mat); q.add(m);
     if (i > 0 && !o.fur) { const j = mk(new THREE.SphereGeometry(r0 * 1.0, 12, 8), o.jointMat || mat); q.add(j); } p = q; });
   return piv; }
 const ease = (a, b, k) => a + (b - a) * k;
@@ -8664,7 +8788,7 @@ function buildFrostmane() { const MALE = SEXM();
   neck.add(furCoat(tubeGeo(np, nr, { sg: 18, cap: "start", rz: () => 0.8, colFn: coatCol }), { len: 0.03, rep: [80, 120], tip: "#ffffff", tipK: 0.4, layers: 10 }));
   const head = new THREE.Group(); head.position.set(0.21, 0.5, 0); neck.add(head);
   const hg = blobGeo(0.17, 0.12, 0.1, (x, y) => belly.clone().lerp(top, (y + 1) / 2)); const skull = mk(hg, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.75 })); skull.position.set(0.04, 0, 0); head.add(skull);
-  const snout = mk(blobGeo(0.13, 0.075, 0.07, (x, y) => lin("#eef3ff").lerp(lin("#d6e2fb"), (1 - y) / 2)), skull.material); snout.position.set(0.19, -0.05, 0); snout.rotation.z = -0.25; head.add(snout);
+  const snout = mk(blobGeo(0.13, 0.075, 0.07, (x, y) => lin("#eef3ff").lerp(lin("#d6e2fb"), (1 - y) / 2)), skull.material); snout.position.set(0.19, -0.05, 0); snout.rotation.z = -0.25; head.add(snout); if (TUFT_ON) { const eyeAt = (x, y, z) => Math.hypot(x - 0.06, y - 0.03, Math.abs(z) - 0.085) < 0.05; skull.add(TUFT.layer(hg, { len: 0.016, tip: "#ffffff", flow: [-1, 0.15, 0], lift: 0.3, skip: eyeAt })); snout.add(TUFT.layer(snout.geometry, { len: 0.011, tip: "#ffffff", flow: [-1, 0.2, 0], lift: 0.22, skip: (x, y, z) => x > 0.1 })); }   /* Petra: fur on the head too */
   const nose = mk(new THREE.SphereGeometry(0.03, 10, 8), new THREE.MeshStandardMaterial({ color: lin("#4a5a8a"), roughness: 0.3 })); nose.position.set(0.31, -0.08, 0); nose.scale.set(1, 0.7, 1.2); head.add(nose);
   const eyeM = new THREE.MeshStandardMaterial({ color: lin("#1a2a6a"), emissive: lin("#5fb8ff"), emissiveIntensity: 0.6, roughness: 0.1 });
   const gEyes = [], gHl = [];
@@ -8707,7 +8831,8 @@ function buildFrostmane() { const MALE = SEXM();
   root.userData.update = dt => { t += dt; const tw = mode === "walk" ? 1 : mode === "run" ? 1 : 0; wk = ease(wk, tw, Math.min(1, dt * 4)); sl = ease(sl, mode === "sleep" ? 1 : 0, Math.min(1, dt * 2.5)); gEyes.forEach(e => e.scale.y = 1.15 * (1 - 0.9 * sl)); gHl.forEach(h => h.visible = sl < 0.4); eyeM.emissiveIntensity = 0.6 * (1 - 0.7 * sl); const run = mode === "run", sp = run ? 9 : 5.2, ph = t * sp;
     /* legs */
     legs.forEach(L => { const a = ph + L.ph + (run ? (L.front ? 0 : 0.6) : 0), s = Math.sin(a), c = Math.cos(a), amp = run ? 0.75 : 0.42;
-      L.piv[0].rotation.z = wk * s * amp * (L.front ? 0.9 : 1); L.piv[1].rotation.z = wk * (L.front ? Math.max(0, c) * 0.9 : -Math.max(0, -c) * 0.9 - 0.15) + (L.front ? 0.04 : -0.08); L.piv[2].rotation.z = wk * (L.front ? -Math.max(0, -c) * 0.8 : Math.max(0, c) * 0.7) + (L.front ? -0.05 : 0.18);
+      const fold = Math.pow(Math.max(0, c), 0.8);   /* Petra 2026-11-21: legs lift while they swing FORWARD (the old walk lifted the hind legs on the back-stroke, so it looked like walking backwards); front knees fold back like a deer, hind hocks fold up */
+      L.piv[0].rotation.z = wk * (s * amp * (L.front ? 0.9 : 1) + (L.front ? 0.12 : -0.1) * fold); L.piv[1].rotation.z = wk * (L.front ? -fold * (run ? 1.25 : 0.85) : -fold * (run ? 0.9 : 0.6) - 0.1) + (L.front ? 0.04 : -0.08); L.piv[2].rotation.z = wk * (L.front ? -fold * (run ? 0.45 : 0.3) : fold * (run ? 1.3 : 1.0)) + (L.front ? -0.05 : 0.18);
       if (sl > 0.001) { L.piv[0].rotation.z += sl * (L.front ? 1.25 : 1.45); L.piv[1].rotation.z += sl * (L.front ? -2.5 : -2.3); L.piv[2].rotation.z += sl * (L.front ? 1.1 : 0.9); } });   /* sleeping: legs folded under like a resting deer */
     body.position.y = wk * Math.abs(Math.sin(ph)) * (run ? 0.06 : 0.025) + (1 - wk) * Math.sin(t * 1.4) * 0.006; body.rotation.z = run ? Math.sin(ph) * 0.05 * wk : 0;
     neck.rotation.z = (1 - wk) * (0.05 * Math.sin(t * 0.5) * (1 - sl) + (mode === "graze" ? -1.1 : 0)) + wk * (run ? -0.35 : -0.08) + (mode === "graze" ? -0.3 : 0) - sl * 0.55; head.rotation.z = (mode === "graze" ? -0.6 : 0) + Math.sin(t * 0.7) * 0.04 * (1 - wk) * (1 - sl) + sl * 0.35;
@@ -8827,7 +8952,7 @@ function buildVelvuro() { const MALE = SEXM();
   const furs = [], stars = [];
   function coat(geo, len, rep) { const c = furCoat(geo, { len, rep, tip: "#6a68c8", tipK: 0.55, layers: 10 }); furs.push(c); return c; }
   function starsOn(geo, par, n, R) { const P = geo.attributes.position, N = geo.attributes.normal, pos = new Float32Array(n * 3), ph = new Float32Array(n);
-    for (let i = 0; i < n; i++) { const k = Math.floor(R() * P.count); pos[i * 3] = P.getX(k) + N.getX(k) * 0.016; pos[i * 3 + 1] = P.getY(k) + N.getY(k) * 0.016; pos[i * 3 + 2] = P.getZ(k) + N.getZ(k) * 0.016; ph[i] = R() * 6.28; }
+    for (let i = 0; i < n; i++) { const k = Math.floor(R() * P.count); const so = TUFT_ON ? 0.045 : 0.016; pos[i * 3] = P.getX(k) + N.getX(k) * so; pos[i * 3 + 1] = P.getY(k) + N.getY(k) * so; pos[i * 3 + 2] = P.getZ(k) + N.getZ(k) * so;   /* stars sit on top of the new fur */ ph[i] = R() * 6.28; }
     const g = new THREE.BufferGeometry(); g.setAttribute("position", new THREE.BufferAttribute(pos, 3)); g.setAttribute("ph", new THREE.BufferAttribute(ph, 1));
     const m = new THREE.ShaderMaterial({ uniforms: { t: { value: 0 }, op: { value: 1 }, px: { value: 1 } }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
       vertexShader: "uniform float t, px; attribute float ph; varying float vA; void main(){ vec4 mv = modelViewMatrix * vec4(position, 1.0); gl_Position = projectionMatrix * mv; float tw = 0.5 + 0.5 * sin(t * (1.5 + fract(ph) * 2.0) + ph * 5.0); vA = tw; gl_PointSize = px * (2.0 + 5.0 * tw * tw) * 2.0 / -mv.z; }",
@@ -9085,7 +9210,7 @@ function furMat(o) { const m = new THREE.MeshStandardMaterial({ color: 0xffffff,
     sh.fragmentShader = "uniform float uK, uTipK; uniform vec2 uRep; uniform sampler2D uNoise; uniform vec3 uTip; varying vec2 vFU;\n" + sh.fragmentShader.replace("#include <color_fragment>", "#include <color_fragment>\n float fn = texture2D(uNoise, vFU * uRep).r; if (uK > 0.01 && fn < uK * 0.92 + 0.04) discard; diffuseColor.rgb *= mix(0.55, 1.05, uK); diffuseColor.rgb = mix(diffuseColor.rgb, uTip, uK * uK * uTipK);"); };
   m.customProgramCacheKey = () => "fur1"; return m; }
 /* geometry -> base mesh plus fur shells, all in one group */
-function furCoat(geo, o) { const g = new THREE.Group(), L = o.layers || 12; for (let i = 0; i <= L; i++) { const m = mk(geo, furMat({ k: i / L, len: o.len, rep: o.rep || [40, 40], tip: o.tip, tipK: o.tipK })); if (i > 0) m.castShadow = false; g.add(m); } g.userData.wind = t => g.children.forEach(m => { m.material.userData.U.uWind.value = t; }); return g; }
+function furCoat(geo, o) { if (TUFT_ON) return TUFT.coat(geo, o); const g = new THREE.Group(), L = o.layers || 12; for (let i = 0; i <= L; i++) { const m = mk(geo, furMat({ k: i / L, len: o.len, rep: o.rep || [40, 40], tip: o.tip, tipK: o.tipK })); if (i > 0) m.castShadow = false; g.add(m); } g.userData.wind = t => g.children.forEach(m => { m.material.userData.U.uWind.value = t; }); return g; }
 function glassMat(c, op = 0.35, em = 0.25) { return new THREE.MeshPhysicalMaterial({ color: lin(c), emissive: lin(c), emissiveIntensity: em, roughness: 0.08, metalness: 0, clearcoat: 1, clearcoatRoughness: 0.1, transparent: true, opacity: op, side: THREE.DoubleSide, depthWrite: false }); }
 function glowMat(c, k = 1.6) { return new THREE.MeshStandardMaterial({ color: lin(c), emissive: lin(c), emissiveIntensity: k, roughness: 0.4 }); }
 function haloSprite(c, s, op = 0.6) { const cv = cnv(64, 64), g = cv.getContext("2d"), gr = g.createRadialGradient(32, 32, 0, 32, 32, 32); gr.addColorStop(0, "rgba(255,255,255,1)"); gr.addColorStop(0.35, "rgba(255,255,255,0.45)"); gr.addColorStop(1, "rgba(255,255,255,0)"); g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
@@ -9106,7 +9231,7 @@ function ribbonTex(c1, c2, edge) { const c = cnv(256, 64), g = c.getContext("2d"
 function legChain(parent, lens, rads, mat, o = {}) { const piv = []; let p = parent;
   lens.forEach((L, i) => { const q = new THREE.Group(); if (i > 0) q.position.y = -lens[i - 1]; p.add(q); piv.push(q);
     const r0 = rads[i], r1 = rads[i + 1] ?? rads[i] * 0.8, pts = [new V(0, 0, 0), new V(0, -L * 0.5, 0), new V(0, -L, 0)];
-    const g = tubeGeo(pts, [r0, (r0 + r1) / 2 * (o.bulge ? 1.12 : 1), r1], { sg: 12, cap: true, colFn: o.colFn ? (f, a) => o.colFn((i + f) / lens.length, a) : null }); const m = o.fur ? furCoat(g, o.fur) : mk(g, mat); q.add(m);
+    const g = tubeGeo(pts, [r0, (r0 + r1) / 2 * (o.bulge ? 1.12 : 1), r1], { sg: 12, cap: true, colFn: o.colFn ? (f, a) => o.colFn((i + f) / lens.length, a) : null }); const m = o.fur ? furCoat(g, Object.assign({ flow: [0.2, -1, 0] }, o.fur)) : mk(g, mat); q.add(m);
     if (i > 0 && !o.fur) { const j = mk(new THREE.SphereGeometry(r0 * 1.0, 12, 8), o.jointMat || mat); q.add(j); } p = q; });
   return piv; }
 const ease = (a, b, k) => a + (b - a) * k;
@@ -9471,7 +9596,7 @@ function furMat(o) { const m = new THREE.MeshStandardMaterial({ color: 0xffffff,
     sh.fragmentShader = "uniform float uK, uTipK; uniform vec2 uRep; uniform sampler2D uNoise; uniform vec3 uTip; varying vec2 vFU;\n" + sh.fragmentShader.replace("#include <color_fragment>", "#include <color_fragment>\n float fn = texture2D(uNoise, vFU * uRep).r; if (uK > 0.01 && fn < uK * 0.92 + 0.04) discard; diffuseColor.rgb *= mix(0.55, 1.05, uK); diffuseColor.rgb = mix(diffuseColor.rgb, uTip, uK * uK * uTipK);"); };
   m.customProgramCacheKey = () => "fur1"; return m; }
 /* geometry -> base mesh plus fur shells, all in one group */
-function furCoat(geo, o) { const g = new THREE.Group(), L = o.layers || 12; for (let i = 0; i <= L; i++) { const m = mk(geo, furMat({ k: i / L, len: o.len, rep: o.rep || [40, 40], tip: o.tip, tipK: o.tipK })); if (i > 0) m.castShadow = false; g.add(m); } g.userData.wind = t => g.children.forEach(m => { m.material.userData.U.uWind.value = t; }); return g; }
+function furCoat(geo, o) { if (TUFT_ON) return TUFT.coat(geo, o); const g = new THREE.Group(), L = o.layers || 12; for (let i = 0; i <= L; i++) { const m = mk(geo, furMat({ k: i / L, len: o.len, rep: o.rep || [40, 40], tip: o.tip, tipK: o.tipK })); if (i > 0) m.castShadow = false; g.add(m); } g.userData.wind = t => g.children.forEach(m => { m.material.userData.U.uWind.value = t; }); return g; }
 function glassMat(c, op = 0.35, em = 0.25) { return new THREE.MeshPhysicalMaterial({ color: lin(c), emissive: lin(c), emissiveIntensity: em, roughness: 0.08, metalness: 0, clearcoat: 1, clearcoatRoughness: 0.1, transparent: true, opacity: op, side: THREE.DoubleSide, depthWrite: false }); }
 function glowMat(c, k = 1.6) { return new THREE.MeshStandardMaterial({ color: lin(c), emissive: lin(c), emissiveIntensity: k, roughness: 0.4 }); }
 function haloSprite(c, s, op = 0.6) { const cv = cnv(64, 64), g = cv.getContext("2d"), gr = g.createRadialGradient(32, 32, 0, 32, 32, 32); gr.addColorStop(0, "rgba(255,255,255,1)"); gr.addColorStop(0.35, "rgba(255,255,255,0.45)"); gr.addColorStop(1, "rgba(255,255,255,0)"); g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
@@ -9492,7 +9617,7 @@ function ribbonTex(c1, c2, edge) { const c = cnv(256, 64), g = c.getContext("2d"
 function legChain(parent, lens, rads, mat, o = {}) { const piv = []; let p = parent;
   lens.forEach((L, i) => { const q = new THREE.Group(); if (i > 0) q.position.y = -lens[i - 1]; p.add(q); piv.push(q);
     const r0 = rads[i], r1 = rads[i + 1] ?? rads[i] * 0.8, pts = [new V(0, 0, 0), new V(0, -L * 0.5, 0), new V(0, -L, 0)];
-    const g = tubeGeo(pts, [r0, (r0 + r1) / 2 * (o.bulge ? 1.12 : 1), r1], { sg: 12, cap: true, colFn: o.colFn ? (f, a) => o.colFn((i + f) / lens.length, a) : null }); const m = o.fur ? furCoat(g, o.fur) : mk(g, mat); q.add(m);
+    const g = tubeGeo(pts, [r0, (r0 + r1) / 2 * (o.bulge ? 1.12 : 1), r1], { sg: 12, cap: true, colFn: o.colFn ? (f, a) => o.colFn((i + f) / lens.length, a) : null }); const m = o.fur ? furCoat(g, Object.assign({ flow: [0.2, -1, 0] }, o.fur)) : mk(g, mat); q.add(m);
     if (i > 0 && !o.fur) { const j = mk(new THREE.SphereGeometry(r0 * 1.0, 12, 8), o.jointMat || mat); q.add(j); } p = q; });
   return piv; }
 const ease = (a, b, k) => a + (b - a) * k;
@@ -9546,7 +9671,7 @@ function furMat2(o) { const m = new THREE.MeshStandardMaterial({ color: 0xffffff
     sh.fragmentShader = "uniform float uK, uGlow, uSpotS; uniform vec2 uRep; uniform sampler2D uNoise; uniform sampler2D uSpot; uniform vec3 uSpotCol; varying vec2 vFU;\n" + sh.fragmentShader.replace("#include <color_fragment>", "#include <color_fragment>\n float fn = texture2D(uNoise, vFU * uRep).r; if (uK > 0.01 && fn < uK * 0.9 + 0.05) discard; float sp = texture2D(uSpot, vec2(vFU.x * uSpotS, vFU.y)).r; diffuseColor.rgb = mix(diffuseColor.rgb, uSpotCol, sp * 0.8); diffuseColor.rgb *= mix(0.6, 1.08, uK);").replace("#include <emissivemap_fragment>", "#include <emissivemap_fragment>\n totalEmissiveRadiance += uSpotCol * sp * uGlow;"); };
   m.customProgramCacheKey = () => "fur2"; return m; }
 const BLACK_TEX = (() => { const c = cnv(4, 4), g = c.getContext("2d"); g.fillStyle = "#000"; g.fillRect(0, 0, 4, 4); return new THREE.CanvasTexture(c); })();
-function furShells(o) { const g = new THREE.Group(), L = o.layers || 12, ms = []; let geo = o.geo || new THREE.BufferGeometry();
+function furShells(o) { if (TUFT_ON && o.layers !== 0 && o.len > 0.004) return TUFT.shells(o); const g = new THREE.Group(), L = o.layers || 12, ms = []; let geo = o.geo || new THREE.BufferGeometry();
   for (let i = 0; i <= L; i++) { const m = new THREE.Mesh(geo, furMat2(Object.assign({}, o, { k: i / L }))); m.castShadow = i === 0; m.receiveShadow = true; m.frustumCulled = false; g.add(m); ms.push(m); }
   g.userData.set = ng => { if (geo && geo !== ng) geo.dispose(); geo = ng; ms.forEach(m => m.geometry = ng); }; return g; }
 
@@ -9706,7 +9831,7 @@ function furMat(o) { const m = new THREE.MeshStandardMaterial({ color: 0xffffff,
     sh.fragmentShader = "uniform float uK, uTipK; uniform vec2 uRep; uniform sampler2D uNoise; uniform vec3 uTip; varying vec2 vFU;\n" + sh.fragmentShader.replace("#include <color_fragment>", "#include <color_fragment>\n float fn = texture2D(uNoise, vFU * uRep).r; if (uK > 0.01 && fn < uK * 0.92 + 0.04) discard; diffuseColor.rgb *= mix(0.55, 1.05, uK); diffuseColor.rgb = mix(diffuseColor.rgb, uTip, uK * uK * uTipK);"); };
   m.customProgramCacheKey = () => "fur1"; return m; }
 /* geometry -> base mesh plus fur shells, all in one group */
-function furCoat(geo, o) { const g = new THREE.Group(), L = o.layers || 12; for (let i = 0; i <= L; i++) { const m = mk(geo, furMat({ k: i / L, len: o.len, rep: o.rep || [40, 40], tip: o.tip, tipK: o.tipK })); if (i > 0) m.castShadow = false; g.add(m); } g.userData.wind = t => g.children.forEach(m => { m.material.userData.U.uWind.value = t; }); return g; }
+function furCoat(geo, o) { if (TUFT_ON) return TUFT.coat(geo, o); const g = new THREE.Group(), L = o.layers || 12; for (let i = 0; i <= L; i++) { const m = mk(geo, furMat({ k: i / L, len: o.len, rep: o.rep || [40, 40], tip: o.tip, tipK: o.tipK })); if (i > 0) m.castShadow = false; g.add(m); } g.userData.wind = t => g.children.forEach(m => { m.material.userData.U.uWind.value = t; }); return g; }
 function glassMat(c, op = 0.35, em = 0.25) { return new THREE.MeshPhysicalMaterial({ color: lin(c), emissive: lin(c), emissiveIntensity: em, roughness: 0.08, metalness: 0, clearcoat: 1, clearcoatRoughness: 0.1, transparent: true, opacity: op, side: THREE.DoubleSide, depthWrite: false }); }
 function glowMat(c, k = 1.6) { return new THREE.MeshStandardMaterial({ color: lin(c), emissive: lin(c), emissiveIntensity: k, roughness: 0.4 }); }
 function haloSprite(c, s, op = 0.6) { const cv = cnv(64, 64), g = cv.getContext("2d"), gr = g.createRadialGradient(32, 32, 0, 32, 32, 32); gr.addColorStop(0, "rgba(255,255,255,1)"); gr.addColorStop(0.35, "rgba(255,255,255,0.45)"); gr.addColorStop(1, "rgba(255,255,255,0)"); g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
@@ -9727,7 +9852,7 @@ function ribbonTex(c1, c2, edge) { const c = cnv(256, 64), g = c.getContext("2d"
 function legChain(parent, lens, rads, mat, o = {}) { const piv = []; let p = parent;
   lens.forEach((L, i) => { const q = new THREE.Group(); if (i > 0) q.position.y = -lens[i - 1]; p.add(q); piv.push(q);
     const r0 = rads[i], r1 = rads[i + 1] ?? rads[i] * 0.8, pts = [new V(0, 0, 0), new V(0, -L * 0.5, 0), new V(0, -L, 0)];
-    const g = tubeGeo(pts, [r0, (r0 + r1) / 2 * (o.bulge ? 1.12 : 1), r1], { sg: 12, cap: true, colFn: o.colFn ? (f, a) => o.colFn((i + f) / lens.length, a) : null }); const m = o.fur ? furCoat(g, o.fur) : mk(g, mat); q.add(m);
+    const g = tubeGeo(pts, [r0, (r0 + r1) / 2 * (o.bulge ? 1.12 : 1), r1], { sg: 12, cap: true, colFn: o.colFn ? (f, a) => o.colFn((i + f) / lens.length, a) : null }); const m = o.fur ? furCoat(g, Object.assign({ flow: [0.2, -1, 0] }, o.fur)) : mk(g, mat); q.add(m);
     if (i > 0 && !o.fur) { const j = mk(new THREE.SphereGeometry(r0 * 1.0, 12, 8), o.jointMat || mat); q.add(j); } p = q; });
   return piv; }
 const ease = (a, b, k) => a + (b - a) * k;
@@ -9781,7 +9906,7 @@ function furMat2(o) { const m = new THREE.MeshStandardMaterial({ color: 0xffffff
     sh.fragmentShader = "uniform float uK, uGlow, uSpotS; uniform vec2 uRep; uniform sampler2D uNoise; uniform sampler2D uSpot; uniform vec3 uSpotCol; varying vec2 vFU;\n" + sh.fragmentShader.replace("#include <color_fragment>", "#include <color_fragment>\n float fn = texture2D(uNoise, vFU * uRep).r; if (uK > 0.01 && fn < uK * 0.9 + 0.05) discard; float sp = texture2D(uSpot, vec2(vFU.x * uSpotS, vFU.y)).r; diffuseColor.rgb = mix(diffuseColor.rgb, uSpotCol, sp * 0.8); diffuseColor.rgb *= mix(0.6, 1.08, uK);").replace("#include <emissivemap_fragment>", "#include <emissivemap_fragment>\n totalEmissiveRadiance += uSpotCol * sp * uGlow;"); };
   m.customProgramCacheKey = () => "fur2"; return m; }
 const BLACK_TEX = (() => { const c = cnv(4, 4), g = c.getContext("2d"); g.fillStyle = "#000"; g.fillRect(0, 0, 4, 4); return new THREE.CanvasTexture(c); })();
-function furShells(o) { const g = new THREE.Group(), L = o.layers || 12, ms = []; let geo = o.geo || new THREE.BufferGeometry();
+function furShells(o) { if (TUFT_ON && o.layers !== 0 && o.len > 0.004) return TUFT.shells(o); const g = new THREE.Group(), L = o.layers || 12, ms = []; let geo = o.geo || new THREE.BufferGeometry();
   for (let i = 0; i <= L; i++) { const m = new THREE.Mesh(geo, furMat2(Object.assign({}, o, { k: i / L }))); m.castShadow = i === 0; m.receiveShadow = true; m.frustumCulled = false; g.add(m); ms.push(m); }
   g.userData.set = ng => { if (geo && geo !== ng) geo.dispose(); geo = ng; ms.forEach(m => m.geometry = ng); }; return g; }
 
@@ -10047,7 +10172,7 @@ function furMat(o) { const m = new THREE.MeshStandardMaterial({ color: 0xffffff,
     sh.fragmentShader = "uniform float uK, uTipK; uniform vec2 uRep; uniform sampler2D uNoise; uniform vec3 uTip; varying vec2 vFU;\n" + sh.fragmentShader.replace("#include <color_fragment>", "#include <color_fragment>\n float fn = texture2D(uNoise, vFU * uRep).r; if (uK > 0.01 && fn < uK * 0.92 + 0.04) discard; diffuseColor.rgb *= mix(0.55, 1.05, uK); diffuseColor.rgb = mix(diffuseColor.rgb, uTip, uK * uK * uTipK);"); };
   m.customProgramCacheKey = () => "fur1"; return m; }
 /* geometry -> base mesh plus fur shells, all in one group */
-function furCoat(geo, o) { const g = new THREE.Group(), L = o.layers || 12; for (let i = 0; i <= L; i++) { const m = mk(geo, furMat({ k: i / L, len: o.len, rep: o.rep || [40, 40], tip: o.tip, tipK: o.tipK })); if (i > 0) m.castShadow = false; g.add(m); } g.userData.wind = t => g.children.forEach(m => { m.material.userData.U.uWind.value = t; }); return g; }
+function furCoat(geo, o) { if (TUFT_ON) return TUFT.coat(geo, o); const g = new THREE.Group(), L = o.layers || 12; for (let i = 0; i <= L; i++) { const m = mk(geo, furMat({ k: i / L, len: o.len, rep: o.rep || [40, 40], tip: o.tip, tipK: o.tipK })); if (i > 0) m.castShadow = false; g.add(m); } g.userData.wind = t => g.children.forEach(m => { m.material.userData.U.uWind.value = t; }); return g; }
 function glassMat(c, op = 0.35, em = 0.25) { return new THREE.MeshPhysicalMaterial({ color: lin(c), emissive: lin(c), emissiveIntensity: em, roughness: 0.08, metalness: 0, clearcoat: 1, clearcoatRoughness: 0.1, transparent: true, opacity: op, side: THREE.DoubleSide, depthWrite: false }); }
 function glowMat(c, k = 1.6) { return new THREE.MeshStandardMaterial({ color: lin(c), emissive: lin(c), emissiveIntensity: k, roughness: 0.4 }); }
 function haloSprite(c, s, op = 0.6) { const cv = cnv(64, 64), g = cv.getContext("2d"), gr = g.createRadialGradient(32, 32, 0, 32, 32, 32); gr.addColorStop(0, "rgba(255,255,255,1)"); gr.addColorStop(0.35, "rgba(255,255,255,0.45)"); gr.addColorStop(1, "rgba(255,255,255,0)"); g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
@@ -10068,7 +10193,7 @@ function ribbonTex(c1, c2, edge) { const c = cnv(256, 64), g = c.getContext("2d"
 function legChain(parent, lens, rads, mat, o = {}) { const piv = []; let p = parent;
   lens.forEach((L, i) => { const q = new THREE.Group(); if (i > 0) q.position.y = -lens[i - 1]; p.add(q); piv.push(q);
     const r0 = rads[i], r1 = rads[i + 1] ?? rads[i] * 0.8, pts = [new V(0, 0, 0), new V(0, -L * 0.5, 0), new V(0, -L, 0)];
-    const g = tubeGeo(pts, [r0, (r0 + r1) / 2 * (o.bulge ? 1.12 : 1), r1], { sg: 12, cap: true, colFn: o.colFn ? (f, a) => o.colFn((i + f) / lens.length, a) : null }); const m = o.fur ? furCoat(g, o.fur) : mk(g, mat); q.add(m);
+    const g = tubeGeo(pts, [r0, (r0 + r1) / 2 * (o.bulge ? 1.12 : 1), r1], { sg: 12, cap: true, colFn: o.colFn ? (f, a) => o.colFn((i + f) / lens.length, a) : null }); const m = o.fur ? furCoat(g, Object.assign({ flow: [0.2, -1, 0] }, o.fur)) : mk(g, mat); q.add(m);
     if (i > 0 && !o.fur) { const j = mk(new THREE.SphereGeometry(r0 * 1.0, 12, 8), o.jointMat || mat); q.add(j); } p = q; });
   return piv; }
 const ease = (a, b, k) => a + (b - a) * k;
@@ -10122,7 +10247,7 @@ function furMat2(o) { const m = new THREE.MeshStandardMaterial({ color: 0xffffff
     sh.fragmentShader = "uniform float uK, uGlow, uSpotS; uniform vec2 uRep; uniform sampler2D uNoise; uniform sampler2D uSpot; uniform vec3 uSpotCol; varying vec2 vFU;\n" + sh.fragmentShader.replace("#include <color_fragment>", "#include <color_fragment>\n float fn = texture2D(uNoise, vFU * uRep).r; if (uK > 0.01 && fn < uK * 0.9 + 0.05) discard; float sp = texture2D(uSpot, vec2(vFU.x * uSpotS, vFU.y)).r; diffuseColor.rgb = mix(diffuseColor.rgb, uSpotCol, sp * 0.8); diffuseColor.rgb *= mix(0.6, 1.08, uK);").replace("#include <emissivemap_fragment>", "#include <emissivemap_fragment>\n totalEmissiveRadiance += uSpotCol * sp * uGlow;"); };
   m.customProgramCacheKey = () => "fur2"; return m; }
 const BLACK_TEX = (() => { const c = cnv(4, 4), g = c.getContext("2d"); g.fillStyle = "#000"; g.fillRect(0, 0, 4, 4); return new THREE.CanvasTexture(c); })();
-function furShells(o) { const g = new THREE.Group(), L = o.layers || 12, ms = []; let geo = o.geo || new THREE.BufferGeometry();
+function furShells(o) { if (TUFT_ON && o.layers !== 0 && o.len > 0.004) return TUFT.shells(o); const g = new THREE.Group(), L = o.layers || 12, ms = []; let geo = o.geo || new THREE.BufferGeometry();
   for (let i = 0; i <= L; i++) { const m = new THREE.Mesh(geo, furMat2(Object.assign({}, o, { k: i / L }))); m.castShadow = i === 0; m.receiveShadow = true; m.frustumCulled = false; g.add(m); ms.push(m); }
   g.userData.set = ng => { if (geo && geo !== ng) geo.dispose(); geo = ng; ms.forEach(m => m.geometry = ng); }; return g; }
 
@@ -10289,7 +10414,7 @@ function furMat(o) { const m = new THREE.MeshStandardMaterial({ color: 0xffffff,
     sh.fragmentShader = "uniform float uK, uTipK; uniform vec2 uRep; uniform sampler2D uNoise; uniform vec3 uTip; varying vec2 vFU;\n" + sh.fragmentShader.replace("#include <color_fragment>", "#include <color_fragment>\n float fn = texture2D(uNoise, vFU * uRep).r; if (uK > 0.01 && fn < uK * 0.92 + 0.04) discard; diffuseColor.rgb *= mix(0.55, 1.05, uK); diffuseColor.rgb = mix(diffuseColor.rgb, uTip, uK * uK * uTipK);"); };
   m.customProgramCacheKey = () => "fur1"; return m; }
 /* geometry -> base mesh plus fur shells, all in one group */
-function furCoat(geo, o) { const g = new THREE.Group(), L = o.layers || 12; for (let i = 0; i <= L; i++) { const m = mk(geo, furMat({ k: i / L, len: o.len, rep: o.rep || [40, 40], tip: o.tip, tipK: o.tipK })); if (i > 0) m.castShadow = false; g.add(m); } g.userData.wind = t => g.children.forEach(m => { m.material.userData.U.uWind.value = t; }); return g; }
+function furCoat(geo, o) { if (TUFT_ON) return TUFT.coat(geo, o); const g = new THREE.Group(), L = o.layers || 12; for (let i = 0; i <= L; i++) { const m = mk(geo, furMat({ k: i / L, len: o.len, rep: o.rep || [40, 40], tip: o.tip, tipK: o.tipK })); if (i > 0) m.castShadow = false; g.add(m); } g.userData.wind = t => g.children.forEach(m => { m.material.userData.U.uWind.value = t; }); return g; }
 function glassMat(c, op = 0.35, em = 0.25) { return new THREE.MeshPhysicalMaterial({ color: lin(c), emissive: lin(c), emissiveIntensity: em, roughness: 0.08, metalness: 0, clearcoat: 1, clearcoatRoughness: 0.1, transparent: true, opacity: op, side: THREE.DoubleSide, depthWrite: false }); }
 function glowMat(c, k = 1.6) { return new THREE.MeshStandardMaterial({ color: lin(c), emissive: lin(c), emissiveIntensity: k, roughness: 0.4 }); }
 function haloSprite(c, s, op = 0.6) { const cv = cnv(64, 64), g = cv.getContext("2d"), gr = g.createRadialGradient(32, 32, 0, 32, 32, 32); gr.addColorStop(0, "rgba(255,255,255,1)"); gr.addColorStop(0.35, "rgba(255,255,255,0.45)"); gr.addColorStop(1, "rgba(255,255,255,0)"); g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
@@ -10310,7 +10435,7 @@ function ribbonTex(c1, c2, edge) { const c = cnv(256, 64), g = c.getContext("2d"
 function legChain(parent, lens, rads, mat, o = {}) { const piv = []; let p = parent;
   lens.forEach((L, i) => { const q = new THREE.Group(); if (i > 0) q.position.y = -lens[i - 1]; p.add(q); piv.push(q);
     const r0 = rads[i], r1 = rads[i + 1] ?? rads[i] * 0.8, pts = [new V(0, 0, 0), new V(0, -L * 0.5, 0), new V(0, -L, 0)];
-    const g = tubeGeo(pts, [r0, (r0 + r1) / 2 * (o.bulge ? 1.12 : 1), r1], { sg: 12, cap: true, colFn: o.colFn ? (f, a) => o.colFn((i + f) / lens.length, a) : null }); const m = o.fur ? furCoat(g, o.fur) : mk(g, mat); q.add(m);
+    const g = tubeGeo(pts, [r0, (r0 + r1) / 2 * (o.bulge ? 1.12 : 1), r1], { sg: 12, cap: true, colFn: o.colFn ? (f, a) => o.colFn((i + f) / lens.length, a) : null }); const m = o.fur ? furCoat(g, Object.assign({ flow: [0.2, -1, 0] }, o.fur)) : mk(g, mat); q.add(m);
     if (i > 0 && !o.fur) { const j = mk(new THREE.SphereGeometry(r0 * 1.0, 12, 8), o.jointMat || mat); q.add(j); } p = q; });
   return piv; }
 const ease = (a, b, k) => a + (b - a) * k;
@@ -10364,7 +10489,7 @@ function furMat2(o) { const m = new THREE.MeshStandardMaterial({ color: 0xffffff
     sh.fragmentShader = "uniform float uK, uGlow, uSpotS; uniform vec2 uRep; uniform sampler2D uNoise; uniform sampler2D uSpot; uniform vec3 uSpotCol; varying vec2 vFU;\n" + sh.fragmentShader.replace("#include <color_fragment>", "#include <color_fragment>\n float fn = texture2D(uNoise, vFU * uRep).r; if (uK > 0.01 && fn < uK * 0.9 + 0.05) discard; float sp = texture2D(uSpot, vec2(vFU.x * uSpotS, vFU.y)).r; diffuseColor.rgb = mix(diffuseColor.rgb, uSpotCol, sp * 0.8); diffuseColor.rgb *= mix(0.6, 1.08, uK);").replace("#include <emissivemap_fragment>", "#include <emissivemap_fragment>\n totalEmissiveRadiance += uSpotCol * sp * uGlow;"); };
   m.customProgramCacheKey = () => "fur2"; return m; }
 const BLACK_TEX = (() => { const c = cnv(4, 4), g = c.getContext("2d"); g.fillStyle = "#000"; g.fillRect(0, 0, 4, 4); return new THREE.CanvasTexture(c); })();
-function furShells(o) { const g = new THREE.Group(), L = o.layers || 12, ms = []; let geo = o.geo || new THREE.BufferGeometry();
+function furShells(o) { if (TUFT_ON && o.layers !== 0 && o.len > 0.004) return TUFT.shells(o); const g = new THREE.Group(), L = o.layers || 12, ms = []; let geo = o.geo || new THREE.BufferGeometry();
   for (let i = 0; i <= L; i++) { const m = new THREE.Mesh(geo, furMat2(Object.assign({}, o, { k: i / L }))); m.castShadow = i === 0; m.receiveShadow = true; m.frustumCulled = false; g.add(m); ms.push(m); }
   g.userData.set = ng => { if (geo && geo !== ng) geo.dispose(); geo = ng; ms.forEach(m => m.geometry = ng); }; return g; }
 
@@ -10599,7 +10724,7 @@ function furMat(o) { const m = new THREE.MeshStandardMaterial({ color: 0xffffff,
     sh.fragmentShader = "uniform float uK, uTipK; uniform vec2 uRep; uniform sampler2D uNoise; uniform vec3 uTip; varying vec2 vFU;\n" + sh.fragmentShader.replace("#include <color_fragment>", "#include <color_fragment>\n float fn = texture2D(uNoise, vFU * uRep).r; if (uK > 0.01 && fn < uK * 0.92 + 0.04) discard; diffuseColor.rgb *= mix(0.55, 1.05, uK); diffuseColor.rgb = mix(diffuseColor.rgb, uTip, uK * uK * uTipK);"); };
   m.customProgramCacheKey = () => "fur1"; return m; }
 /* geometry -> base mesh plus fur shells, all in one group */
-function furCoat(geo, o) { const g = new THREE.Group(), L = o.layers || 12; for (let i = 0; i <= L; i++) { const m = mk(geo, furMat({ k: i / L, len: o.len, rep: o.rep || [40, 40], tip: o.tip, tipK: o.tipK })); if (i > 0) m.castShadow = false; g.add(m); } g.userData.wind = t => g.children.forEach(m => { m.material.userData.U.uWind.value = t; }); return g; }
+function furCoat(geo, o) {   /* Yxae keeps its own fur here: its new tuft fur comes with its own update */ const g = new THREE.Group(), L = o.layers || 12; for (let i = 0; i <= L; i++) { const m = mk(geo, furMat({ k: i / L, len: o.len, rep: o.rep || [40, 40], tip: o.tip, tipK: o.tipK })); if (i > 0) m.castShadow = false; g.add(m); } g.userData.wind = t => g.children.forEach(m => { m.material.userData.U.uWind.value = t; }); return g; }
 function glassMat(c, op = 0.35, em = 0.25) { return new THREE.MeshPhysicalMaterial({ color: lin(c), emissive: lin(c), emissiveIntensity: em, roughness: 0.08, metalness: 0, clearcoat: 1, clearcoatRoughness: 0.1, transparent: true, opacity: op, side: THREE.DoubleSide, depthWrite: false }); }
 function glowMat(c, k = 1.6) { return new THREE.MeshStandardMaterial({ color: lin(c), emissive: lin(c), emissiveIntensity: k, roughness: 0.4 }); }
 function haloSprite(c, s, op = 0.6) { const cv = cnv(64, 64), g = cv.getContext("2d"), gr = g.createRadialGradient(32, 32, 0, 32, 32, 32); gr.addColorStop(0, "rgba(255,255,255,1)"); gr.addColorStop(0.35, "rgba(255,255,255,0.45)"); gr.addColorStop(1, "rgba(255,255,255,0)"); g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
@@ -10620,7 +10745,7 @@ function ribbonTex(c1, c2, edge) { const c = cnv(256, 64), g = c.getContext("2d"
 function legChain(parent, lens, rads, mat, o = {}) { const piv = []; let p = parent;
   lens.forEach((L, i) => { const q = new THREE.Group(); if (i > 0) q.position.y = -lens[i - 1]; p.add(q); piv.push(q);
     const r0 = rads[i], r1 = rads[i + 1] ?? rads[i] * 0.8, pts = [new V(0, 0, 0), new V(0, -L * 0.5, 0), new V(0, -L, 0)];
-    const g = tubeGeo(pts, [r0, (r0 + r1) / 2 * (o.bulge ? 1.12 : 1), r1], { sg: 12, cap: true, colFn: o.colFn ? (f, a) => o.colFn((i + f) / lens.length, a) : null }); const m = o.fur ? furCoat(g, o.fur) : mk(g, mat); q.add(m);
+    const g = tubeGeo(pts, [r0, (r0 + r1) / 2 * (o.bulge ? 1.12 : 1), r1], { sg: 12, cap: true, colFn: o.colFn ? (f, a) => o.colFn((i + f) / lens.length, a) : null }); const m = o.fur ? furCoat(g, Object.assign({ flow: [0.2, -1, 0] }, o.fur)) : mk(g, mat); q.add(m);
     if (i > 0 && !o.fur) { const j = mk(new THREE.SphereGeometry(r0 * 1.0, 12, 8), o.jointMat || mat); q.add(j); } p = q; });
   return piv; }
 const ease = (a, b, k) => a + (b - a) * k;
@@ -10674,7 +10799,7 @@ function furMat2(o) { const m = new THREE.MeshStandardMaterial({ color: 0xffffff
     sh.fragmentShader = "uniform float uK, uGlow, uSpotS; uniform vec2 uRep; uniform sampler2D uNoise; uniform sampler2D uSpot; uniform vec3 uSpotCol; varying vec2 vFU;\n" + sh.fragmentShader.replace("#include <color_fragment>", "#include <color_fragment>\n float fn = texture2D(uNoise, vFU * uRep).r; if (uK > 0.01 && fn < uK * 0.9 + 0.05) discard; float sp = texture2D(uSpot, vec2(vFU.x * uSpotS, vFU.y)).r; diffuseColor.rgb = mix(diffuseColor.rgb, uSpotCol, sp * 0.8); diffuseColor.rgb *= mix(0.6, 1.08, uK);").replace("#include <emissivemap_fragment>", "#include <emissivemap_fragment>\n totalEmissiveRadiance += uSpotCol * sp * uGlow;"); };
   m.customProgramCacheKey = () => "fur2"; return m; }
 const BLACK_TEX = (() => { const c = cnv(4, 4), g = c.getContext("2d"); g.fillStyle = "#000"; g.fillRect(0, 0, 4, 4); return new THREE.CanvasTexture(c); })();
-function furShells(o) { const g = new THREE.Group(), L = o.layers || 12, ms = []; let geo = o.geo || new THREE.BufferGeometry();
+function furShells(o) {   /* Yxae: see above */ const g = new THREE.Group(), L = o.layers || 12, ms = []; let geo = o.geo || new THREE.BufferGeometry();
   for (let i = 0; i <= L; i++) { const m = new THREE.Mesh(geo, furMat2(Object.assign({}, o, { k: i / L }))); m.castShadow = i === 0; m.receiveShadow = true; m.frustumCulled = false; g.add(m); ms.push(m); }
   g.userData.set = ng => { if (geo && geo !== ng) geo.dispose(); geo = ng; ms.forEach(m => m.geometry = ng); }; return g; }
 
@@ -12232,6 +12357,12 @@ function statsUnique() {   /* any two creatures that still share a number get nu
   pass(k => NIGHT_VISION[k] === undefined ? (NIGHT_VISION[k] = 30) : NIGHT_VISION[k], (k, v) => NIGHT_VISION[k] = v, 1);
   pass(k => STAMINA[k] === undefined ? (STAMINA[k] = 70) : STAMINA[k], (k, v) => STAMINA[k] = v, 1); }
 statsUnique();
+/* Petra 2026-11-21: fur style per creature. lift = how much the tufts stand up (low = smoothed down), lenK = length */
+const FUR_STYLE = { vesper: { lift: 0.3, twist: 1.0, lenK: 0.8, tipMul: 0.25 }, ember: { lift: 0.3, twist: 1.0, lenK: 0.8, tipMul: 0.25 }, viluv: { lift: 0.1, twist: 0.6, lenK: 0.6 }, ifidaki: { lenK: 0.6 }, ypyci: { lift: 0.1, twist: 0.6, lenK: 0.6 } };
+Object.keys(FUR_STYLE).forEach(k => { const C = CREATURES[k]; if (!C || !TUFT_ON) return; const st = FUR_STYLE[k], b0 = C.build;
+  C.build = (...a) => { const old = TUFT_CUR.v; TUFT_CUR.v = st; let api; try { api = b0(...a); } finally { TUFT_CUR.v = old; }
+    if (api && api.update) { const up = api.update; api.update = (...u) => { const o2 = TUFT_CUR.v; TUFT_CUR.v = st; try { return up(...u); } finally { TUFT_CUR.v = o2; } }; }
+    return api; }; });
 let KIND = "vesper", PST = STAGES;
 const CR = () => CREATURES[KIND];
 function setKind(k) { KIND = CREATURES[k] ? k : "vesper"; PST = CR().stages; try { $("bFood").querySelector("span").textContent = CR().sun && !CR().photoCarn ? "Sunlight" : "Food"; $("bFood").classList.toggle("sun", !!CR().sun); $("bWater").querySelector("span").textContent = CR().swim ? "Wetness" : "Water"; ALERTS.water = CR().swim ? ["You're drying out", "Get back into the water"] : ["You're getting thirsty", "Find the river and hold E to drink"]; } catch (e) {} SAVE_KEY = KIND === "vesper" ? SAVE_BASE : SAVE_BASE + "-" + KIND; try { localStorage.setItem("wildborn-kind", KIND); } catch (e) {} }
@@ -12268,7 +12399,7 @@ function applyLook(api, look) { if (!api || !api.root) return; const U = lookUni
       sh.fragmentShader = (pat ? LOOK_GLSL_F : LOOK_GLSL_F.replace(/varying vec3 vLP;/, "vec3 vLP = vec3(0.0);")) + sh.fragmentShader.replace("#include <tonemapping_fragment>", "gl_FragColor.rgb = lookCol(gl_FragColor.rgb, " + (pat ? "true" : "false") + ");\n#include <tonemapping_fragment>"); };
     m.customProgramCacheKey = () => (prevKey ? prevKey() : "") + "|look" + (pat ? "P" : "") + (prev ? prev.toString() : ""); m.needsUpdate = true; }); });
   setLook(api, look); }
-function lookTick(api) { const U = api && api.root.userData.lookU; if (U) { api.root.updateMatrixWorld(); U.uRootInv.value.copy(api.root.matrixWorld).invert(); } }
+function lookTick(api) { if (api && api.root.userData.tuftFollow) api.root.userData.tuftFollow(); const U = api && api.root.userData.lookU; if (U) { api.root.updateMatrixWorld(); U.uRootInv.value.copy(api.root.matrixWorld).invert(); } }
 function lookPickerHTML(sel) { return '<h3>Colour</h3><div class="lookRow">' + LOOK_COLS.map(([n, h], i) => '<button class="sw' + (sel.c === i ? ' on' : '') + '" data-lc="' + i + '" title="' + n + '"><span style="background:' + (h ? h : "conic-gradient(#ff8fb0,#ffd06a,#8fe08a,#6fc0ff,#a98aff,#ff8fb0)") + '"></span>' + n + '</button>').join("") + '</div>'
   + '<h3>Pattern</h3><div class="lookRow">' + LOOK_PATS.map((n, i) => '<button class="pt' + (sel.p === i ? ' on' : '') + '" data-lp="' + i + '">' + n + '</button>').join("") + '</div>'; }
 let fox = null, T = 0, tod = 0.79, autoT = 20;   // time of day: 0 midnight, 0.25 sunrise, 0.5 noon, 0.75 sunset
@@ -12959,7 +13090,7 @@ function frame(now, fixedDt, noDraw) {
   if (toastT > 0) { toastT -= dt; if (toastT <= 0) $("toast").style.opacity = 0; }
   if (started && !player.dead && (autoT = (typeof autoT === "number" ? autoT : 20) - dt) <= 0) { autoT = 20; save(); }   /* the game saves on its own every 20 s */
   if (started) { const st = PST[player.stage]; setBar("bGrow", st.need ? player.growth / st.need * 100 : 100); setBar("bFood", player.food); setBar("bWater", player.water); setBar("bHp", player.hp / maxHp() * 100); hpTxt(); setBar("bStam", player.stam); $("bStam").classList.toggle("tired", !!player.tired); const nb = !!CR().swim || !!CR().semi || player.breath >= 100; if ($("bBreath").hidden !== nb) $("bBreath").hidden = nb; setBar("bBreath", player.breath); }
-  lookTick(fox);
+  lookTick(fox); TUFT.tick(T);
   if (!noDraw) renderer.render(scene, camera);
 }
 
