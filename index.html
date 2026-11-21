@@ -12358,7 +12358,7 @@ function statsUnique() {   /* any two creatures that still share a number get nu
   pass(k => STAMINA[k] === undefined ? (STAMINA[k] = 70) : STAMINA[k], (k, v) => STAMINA[k] = v, 1); }
 statsUnique();
 /* Petra 2026-11-21: fur style per creature. lift = how much the tufts stand up (low = smoothed down), lenK = length */
-const FUR_STYLE = { vesper: { lift: 0.1, twist: 0.6 }, ember: { lift: 0.1, twist: 0.6 }, viluv: { lift: 0.1, twist: 0.6, lenK: 0.6 }, ifidaki: { lenK: 0.6 }, ypyci: { lift: 0.1, twist: 0.6, lenK: 0.6 } };
+const FUR_STYLE = { vesper: { lift: 0.3, twist: 1.0, lenK: 0.8 }, ember: { lift: 0.3, twist: 1.0, lenK: 0.8 }, viluv: { lift: 0.1, twist: 0.6, lenK: 0.6 }, ifidaki: { lenK: 0.6 }, ypyci: { lift: 0.1, twist: 0.6, lenK: 0.6 } };
 Object.keys(FUR_STYLE).forEach(k => { const C = CREATURES[k]; if (!C || !TUFT_ON) return; const st = FUR_STYLE[k], b0 = C.build;
   C.build = (...a) => { const old = TUFT_CUR.v; TUFT_CUR.v = st; let api; try { api = b0(...a); } finally { TUFT_CUR.v = old; }
     if (api && api.update) { const up = api.update; api.update = (...u) => { const o2 = TUFT_CUR.v; TUFT_CUR.v = st; try { return up(...u); } finally { TUFT_CUR.v = o2; } }; }
