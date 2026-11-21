@@ -234,12 +234,12 @@ const TUFT = (() => {
     g.setAttribute("tw", new THREE.Float32BufferAttribute(tw, 1)); g.setIndex(idx); g.computeVertexNormals(); return g; })();
   const wind = { value: 0 };
   /* one material per layer (so each creature's colour picker patches its own), all sharing one shader program */
-  const mat = (o, glowing) => { const m = new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide, roughness: 0.93 });
-    const U = { uTip: { value: new THREE.Color(o.tip || "#ffffff").convertSRGBToLinear() }, uTipK: { value: o.tip ? (o.tipK ?? 0.4) : 0 }, uWindT: wind, uGlowC: { value: new THREE.Color(o.spotCol || "#ffffff").convertSRGBToLinear() }, uGlowK: { value: glowing ? (o.glow || 0) : 0 } };
+  const mat = (o, glowing) => { const m = new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide, roughness: 0.93 }), st = o.style || TUFT_CUR.v, tipMul = st && st.tipMul != null ? st.tipMul : 1;
+    const U = { uTip: { value: new THREE.Color(o.tip || "#ffffff").convertSRGBToLinear() }, uTipK: { value: o.tip ? (o.tipK ?? 0.4) * tipMul : 0 }, uWindT: wind, uRim: { value: 0.42 * tipMul }, uRootK: { value: tipMul }, uGlowC: { value: new THREE.Color(o.spotCol || "#ffffff").convertSRGBToLinear() }, uGlowK: { value: glowing ? (o.glow || 0) : 0 } };
     m.onBeforeCompile = sh => { Object.assign(sh.uniforms, U);
-      sh.vertexShader = "attribute float tw; attribute float aGlow; varying float vTw, vGl; uniform float uWindT;\n" + sh.vertexShader.replace("#include <begin_vertex>", "#include <begin_vertex>\n vTw = tw; vGl = aGlow;\n#ifdef USE_INSTANCING\n transformed.z += sin(uWindT * 2.1 + instanceMatrix[3].x * 37.0 + instanceMatrix[3].y * 29.0 + instanceMatrix[3].z * 23.0) * tw * tw * 0.07;\n#endif");
-      sh.fragmentShader = "varying float vTw, vGl; uniform vec3 uTip, uGlowC; uniform float uTipK, uGlowK;\n" + sh.fragmentShader.replace("#include <color_fragment>", "#include <color_fragment>\n diffuseColor.rgb = mix(diffuseColor.rgb, uTip, vTw * vTw * uTipK);")
-        .replace("#include <emissivemap_fragment>", "#include <emissivemap_fragment>\n { float fr = 1.0 - abs(dot(normalize(normal), normalize(vViewPosition))); totalEmissiveRadiance += diffuseColor.rgb * fr * fr * vTw * 0.42 + uGlowC * vGl * uGlowK; }"); };
+      sh.vertexShader = "attribute float tw; attribute float aGlow; varying float vTw, vGl; uniform float uWindT, uRootK;\n" + sh.vertexShader.replace("#include <begin_vertex>", "#include <begin_vertex>\n vTw = tw; vGl = aGlow;\n#ifdef USE_INSTANCING\n transformed.z += sin(uWindT * 2.1 + instanceMatrix[3].x * 37.0 + instanceMatrix[3].y * 29.0 + instanceMatrix[3].z * 23.0) * tw * tw * 0.07;\n#endif");
+      sh.fragmentShader = "varying float vTw, vGl; uniform vec3 uTip, uGlowC; uniform float uTipK, uGlowK, uRim, uRootK;\n" + sh.fragmentShader.replace("#include <color_fragment>", "#include <color_fragment>\n diffuseColor.rgb = mix(diffuseColor.rgb, uTip, vTw * vTw * uTipK); diffuseColor.rgb *= mix(1.0, 0.82, (1.0 - uRootK) * vTw);")
+        .replace("#include <emissivemap_fragment>", "#include <emissivemap_fragment>\n { float fr = 1.0 - abs(dot(normalize(normal), normalize(vViewPosition))); totalEmissiveRadiance += diffuseColor.rgb * fr * fr * vTw * uRim + uGlowC * vGl * uGlowK; }"); };
     m.customProgramCacheKey = () => "tuft3"; return m; };
   /* pixels of a canvas texture (skins, spot maps), read once */
   const pixCache = new WeakMap();
@@ -12358,7 +12358,7 @@ function statsUnique() {   /* any two creatures that still share a number get nu
   pass(k => STAMINA[k] === undefined ? (STAMINA[k] = 70) : STAMINA[k], (k, v) => STAMINA[k] = v, 1); }
 statsUnique();
 /* Petra 2026-11-21: fur style per creature. lift = how much the tufts stand up (low = smoothed down), lenK = length */
-const FUR_STYLE = { vesper: { lift: 0.3, twist: 1.0, lenK: 0.8 }, ember: { lift: 0.3, twist: 1.0, lenK: 0.8 }, viluv: { lift: 0.1, twist: 0.6, lenK: 0.6 }, ifidaki: { lenK: 0.6 }, ypyci: { lift: 0.1, twist: 0.6, lenK: 0.6 } };
+const FUR_STYLE = { vesper: { lift: 0.3, twist: 1.0, lenK: 0.8, tipMul: 0.25 }, ember: { lift: 0.3, twist: 1.0, lenK: 0.8, tipMul: 0.25 }, viluv: { lift: 0.1, twist: 0.6, lenK: 0.6 }, ifidaki: { lenK: 0.6 }, ypyci: { lift: 0.1, twist: 0.6, lenK: 0.6 } };
 Object.keys(FUR_STYLE).forEach(k => { const C = CREATURES[k]; if (!C || !TUFT_ON) return; const st = FUR_STYLE[k], b0 = C.build;
   C.build = (...a) => { const old = TUFT_CUR.v; TUFT_CUR.v = st; let api; try { api = b0(...a); } finally { TUFT_CUR.v = old; }
     if (api && api.update) { const up = api.update; api.update = (...u) => { const o2 = TUFT_CUR.v; TUFT_CUR.v = st; try { return up(...u); } finally { TUFT_CUR.v = o2; } }; }
