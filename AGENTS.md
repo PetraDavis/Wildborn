@@ -33,6 +33,7 @@ The owner is Petra. These are her standing rules and the facts an agent needs be
 - Keep **exactly 1 replica**: play-together rooms live in the server's memory, so two copies would split players apart.
 - **To release server changes:** merge them into `main` through a pull request, then merge `main` into `production`. Only do the `production` step when Petra says so.
 - The game connects to `wss://<railway domain>/ws`; the website build sets `WB_SERVER` to that address.
+- Live server: `https://wildborn.up.railway.app` (`WB_SERVER = "wss://wildborn.up.railway.app"`). Its home page redirects to the game website, `https://petradavis.github.io/Wildborn/`.
 - Admin page: `https://<railway domain>/admin` (asks for `ADMIN_KEY`). Never ask Petra to send the key.
 
 More detail: `server/README.md`.

@@ -5,6 +5,7 @@
      ADMIN_KEY        SECRET. Long random password for the admin page (/admin). Never share it or put it in the game.
      ALLOWED_ORIGINS  Websites allowed to connect, comma separated. Example: https://petradavis.github.io
      DATABASE_URL     The Postgres address. On Railway set it to ${{Postgres.DATABASE_URL}}.
+     GAME_URL         Where the home page sends people. Default: https://petradavis.github.io/Wildborn/
      PORT             Set by Railway automatically.
 
    The game talks to it over one WebSocket at /ws with small JSON messages:
@@ -22,6 +23,7 @@ const PORT = +process.env.PORT || 8080;
 const ADMIN_KEY = process.env.ADMIN_KEY || "";
 const ORIGINS = (process.env.ALLOWED_ORIGINS || "").split(",").map(s => s.trim().replace(/\/$/, "")).filter(Boolean);
 const DATABASE_URL = process.env.DATABASE_URL || "";
+const GAME_URL = process.env.GAME_URL || "https://petradavis.github.io/Wildborn/";
 const LIMITS = { field: 4600, presence: 7000, roomPlayers: 40, rooms: 4, msgsPerSec: 40, nameRe: /^[a-z0-9_]{3,16}$/, sessionDays: 60 };
 
 /* ---------- database (Postgres) ---------- */
@@ -163,7 +165,9 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname.startsWith("/api/admin/")) { if (!isAdmin(req)) return j(401, { err: ADMIN_KEY.length < 12 ? "ADMIN_KEY is not set (needs 12+ characters)" : "wrong admin key" });
       const a = url.pathname.slice(11); if (a === "summary") return j(200, await summary()); if (req.method !== "POST") return j(405, { err: "POST" });
       const r = await adminDo(a, await readBody(req)); console.log("Admin:", a, r.err || "ok"); return j(r.err ? 400 : 200, r); }
-    res.writeHead(200, { "content-type": "text/plain" }); res.end("Wildborn game server is running.\n");
+    /* the server has no game of its own: send anyone who opens it to the game website */
+    if (url.pathname === "/" || url.pathname === "/index.html") { res.writeHead(302, { location: GAME_URL, "cache-control": "no-store" }); return res.end(); }
+    res.writeHead(404, { "content-type": "text/plain" }); res.end("Not here. The game is at " + GAME_URL + "\n");
   } catch (e) { console.error(e); j(500, { err: "server error" }); } });
 
 /* ---------- connections ---------- */
