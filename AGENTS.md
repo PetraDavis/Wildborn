@@ -30,6 +30,7 @@ The owner is Petra. These are her standing rules and the facts an agent needs be
 - Settings live in `server/railway.json` (Railpack build, `npm start`, health check `GET /health`, restart on failure, **exactly 1 replica**, never sleeps).
 - In the Railway service: Root Directory `/server`, Railway Config File `/server/railway.json`, a Volume mounted at `/data`, and the variables `ADMIN_KEY` (secret) and `ALLOWED_ORIGINS=https://petradavis.github.io`.
 - No Postgres and no bucket: the data (accounts, invites, bans) is a SQLite file (`node:sqlite`) on the volume. That's why it must stay at 1 replica.
+- The volume survives rebuilds and redeploys (only the container is replaced). On Railway the server refuses to start if no volume is attached, so data can never quietly land on the throwaway container disk.
 - **To release server changes:** merge them into `main` through a pull request, then merge `main` into `production`. Only do the `production` step when Petra says so.
 - The game connects to `wss://<railway domain>/ws`; the website build sets `WB_SERVER` to that address.
 - Admin page: `https://<railway domain>/admin` (asks for `ADMIN_KEY`). Never ask Petra to send the key.

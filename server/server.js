@@ -25,6 +25,8 @@ const DATA_DIR = process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH |
 const LIMITS = { field: 4600, presence: 7000, roomPlayers: 40, rooms: 4, msgsPerSec: 40, nameRe: /^[a-z0-9_]{3,16}$/, sessionDays: 60 };
 
 /* ---------- database ---------- */
+/* On Railway the database must live on the volume: anywhere else is wiped on every redeploy, so refuse to start instead of losing accounts */
+if (process.env.RAILWAY_ENVIRONMENT && !process.env.RAILWAY_VOLUME_MOUNT_PATH && !process.env.DATA_DIR) { console.error("No volume attached! Attach a Railway volume (mount path /data) so accounts and invite codes survive redeploys. Not starting."); process.exit(1); }
 fs.mkdirSync(DATA_DIR, { recursive: true });
 const db = new DatabaseSync(path.join(DATA_DIR, "wildborn.db"));
 db.exec(`PRAGMA journal_mode = WAL;
