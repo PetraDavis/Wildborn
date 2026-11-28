@@ -28,9 +28,9 @@ The owner is Petra. These are her standing rules and the facts an agent needs be
 - Hosted on **Railway** (a project on Petra's dad's account, budget $20/month: usage alert at $10, hard limit at $20).
 - **Railway deploys from the `production` branch**, not `main`. Every push to `production` that touches `server/` redeploys the server.
 - Settings live in `server/railway.json` (Railpack build, `npm start`, health check `GET /health`, restart on failure, **exactly 1 replica**, never sleeps).
-- In the Railway service: Root Directory `/server`, Railway Config File `/server/railway.json`, a Volume mounted at `/data`, and the variables `ADMIN_KEY` (secret) and `ALLOWED_ORIGINS=https://petradavis.github.io`.
-- No Postgres and no bucket: the data (accounts, invites, bans) is a SQLite file (`node:sqlite`) on the volume. That's why it must stay at 1 replica.
-- The volume survives rebuilds and redeploys (only the container is replaced). On Railway the server refuses to start if no volume is attached, so data can never quietly land on the throwaway container disk.
+- In the Railway service: Root Directory `/server`, Railway Config File `/server/railway.json`, and the variables `ADMIN_KEY` (secret), `ALLOWED_ORIGINS=https://petradavis.github.io` and `DATABASE_URL=${{Postgres.DATABASE_URL}}`.
+- **Data lives in a Railway Postgres service** (Petra's choice, 2026-11-28): accounts, invite codes, sign-ins (hashed) and settings. It survives rebuilds and redeploys. The game server has no volume and keeps nothing on its own disk. Without `DATABASE_URL` it refuses to start. No bucket.
+- Keep **exactly 1 replica**: play-together rooms live in the server's memory, so two copies would split players apart.
 - **To release server changes:** merge them into `main` through a pull request, then merge `main` into `production`. Only do the `production` step when Petra says so.
 - The game connects to `wss://<railway domain>/ws`; the website build sets `WB_SERVER` to that address.
 - Admin page: `https://<railway domain>/admin` (asks for `ADMIN_KEY`). Never ask Petra to send the key.
@@ -39,7 +39,7 @@ More detail: `server/README.md`.
 
 ## Working on the server
 
-- Node 22.13 or newer (`node:sqlite`). Run locally: `cd server && npm install && ADMIN_KEY=some-long-test-key npm start`, then open `http://localhost:8080/admin`.
+- Node 20 or newer, with the `pg` and `ws` packages. Run locally against a local Postgres: `cd server && npm install && DATABASE_URL=postgres://user@localhost/wildborn ADMIN_KEY=some-long-test-key npm start`, then open `http://localhost:8080/admin`. Tables are created on start (`CREATE TABLE IF NOT EXISTS`); add new columns the same safe way.
 - `server/filter.js` is **generated** from the chat filter in `mpchat.js`, so the game and the server block the same words. Regenerate it when the filter changes; don't edit it by hand.
 - The server checks what players send: it forces names to the account's username, filters chat and room titles, rate-limits, and caps room sizes. Keep those checks when changing the protocol.
 
