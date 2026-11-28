@@ -34,11 +34,12 @@ let KEY = ""; try { KEY = sessionStorage.getItem("wbAdmin") || ""; } catch (e) {
 async function api(a, body) { const r = await fetch("/api/admin/" + a, { method: body ? "POST" : "GET", headers: { "x-admin-key": KEY, "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined }); const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.err || "error " + r.status); return j; }
 const say = t => { $("msg").textContent = t; };
 async function load() { try { const s = await api("summary"); $("login").hidden = true; $("app").hidden = false; render(s); } catch (e) { $("login").hidden = false; $("app").hidden = true; if (KEY) say(e.message); } }
-function render(s) {
+let GAME = "https://petradavis.github.io/Wildborn/"; const link = c => GAME + "?invite=" + encodeURIComponent(c);
+function render(s) { if (s.gameUrl) GAME = s.gameUrl;
   $("status").innerHTML = "<b>" + s.online + "</b> online &middot; " + (s.inviteOnly ? "<span class=ok>Invite only</span>" : "<span class=bad>Open to everyone</span>") + " &middot; <span class=dim>" + s.sentMB + " MB sent since " + ago(s.since) + "</span>";
   $("io").textContent = s.inviteOnly ? "Open to everyone" : "Make invite only again"; $("io").onclick = () => act("invite-only", { on: !s.inviteOnly }, s.inviteOnly ? "Open the game so anyone can make an account without a code?" : null);
   $("ioTip").textContent = s.inviteOnly ? "New players need one of the codes below to make an account." : "Anyone who finds the game can make an account. Codes aren't needed.";
-  $("inv").innerHTML = s.invites.slice().reverse().map(i => "<tr><td class=code>" + esc(i.code) + "</td><td>" + esc(i.note) + "</td><td>" + (i.usedBy ? esc(i.usedBy) : "<span class=ok>not used yet</span>") + "</td><td>" + (i.usedBy ? "" : "<button class='small' data-copy='" + esc(i.code) + "'>Copy</button> <button class='small danger' data-delinv='" + esc(i.code) + "'>Delete</button>") + "</td></tr>").join("") || "<tr><td colspan=4 class=dim>No codes yet.</td></tr>";
+  $("inv").innerHTML = s.invites.slice().reverse().map(i => "<tr><td class=code>" + esc(i.code) + "</td><td>" + esc(i.note) + (i.owner ? " <span class=dim>(" + esc(i.owner) + "'s invite)</span>" : "") + "</td><td>" + (i.usedBy ? esc(i.usedBy) : "<span class=ok>not used yet</span>") + "</td><td>" + (i.usedBy ? "" : "<button class='small' data-copy='" + esc(link(i.code)) + "'>Copy link</button> <button class='small danger' data-delinv='" + esc(i.code) + "'>Delete</button>") + "</td></tr>").join("") || "<tr><td colspan=4 class=dim>No codes yet.</td></tr>";
   $("users").innerHTML = s.users.map(u => "<tr><td><b>" + esc(u.name) + "</b> " + (u.online ? "<span class=ok>online</span>" : "") + (u.banned ? " <span class=bad>banned</span>" : "") + "</td><td>" + day(u.created) + "</td><td>" + ago(u.lastSeen) + "</td><td class=row>"
     + (u.banned ? "<button class=small data-a=unban data-n='" + esc(u.name) + "'>Unban</button>" : "<button class='small danger' data-a=ban data-n='" + esc(u.name) + "'>Ban</button>")
     + "<button class=small data-a=reset-password data-n='" + esc(u.name) + "'>New password</button><button class='small danger' data-a=delete-account data-n='" + esc(u.name) + "'>Delete</button></td></tr>").join("") || "<tr><td colspan=4 class=dim>No players yet.</td></tr>";
@@ -46,9 +47,9 @@ function render(s) {
 }
 const ASK = { ban: n => "Ban " + n + "? They get signed out and can't sign in again until you unban them.", "delete-account": n => "Delete " + n + "'s account for good? This can't be undone.", "reset-password": n => "Make a new password for " + n + "? Their old one stops working." };
 async function act(a, body, confirmText) { if (confirmText && !confirm(confirmText)) return; try { const r = await api(a, body);
-  if (r.made) say("New codes: " + r.made.join("  ")); else if (r.tempPassword) say("New password for " + body.name + ": " + r.tempPassword + "  (tell them in person; they can change it in the game)"); else say("Done."); load(); } catch (e) { say(e.message); } }
+  if (r.made) say("New invite links: " + r.made.map(link).join("  ")); else if (r.tempPassword) say("New password for " + body.name + ": " + r.tempPassword + "  (tell them in person; they can change it in the game)"); else say("Done."); load(); } catch (e) { say(e.message); } }
 document.addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return;
-  if (b.dataset.copy) { navigator.clipboard.writeText(b.dataset.copy).then(() => say("Copied " + b.dataset.copy)); }
+  if (b.dataset.copy) { navigator.clipboard.writeText(b.dataset.copy).then(() => say("Copied the invite link: " + b.dataset.copy)); }
   if (b.dataset.delinv) act("delete-invite", { code: b.dataset.delinv }, "Delete code " + b.dataset.delinv + "?");
   if (b.dataset.a) act(b.dataset.a, { name: b.dataset.n }, ASK[b.dataset.a] && ASK[b.dataset.a](b.dataset.n)); });
 $("go").onclick = () => { KEY = $("key").value.trim(); try { sessionStorage.setItem("wbAdmin", KEY); } catch (e) {} say(""); load(); };

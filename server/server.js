@@ -10,6 +10,7 @@
 
    The game talks to it over one WebSocket at /ws with small JSON messages:
      signup {name,pw,code} | login {name,pw} | resume {token} | logout | chpw {old,pw}  ->  auth {ok,name,token,err}
+     myinvites -> invites {list:[[code, usedBy]]}   (every player gets 3 single-use invite codes of their own)
      join {room} -> peers {room,me,list:[[peer,presence]]};  p {room,patch} -> pu {room,peer,patch};  leave {room}
      others: pj {room,peer,presence} (joined), pl {room,peer} (left)
    Presence works like Claude's rooms: each player owns a few fields; a patch replaces fields, null removes one. */
@@ -24,6 +25,7 @@ const ADMIN_KEY = process.env.ADMIN_KEY || "";
 const ORIGINS = (process.env.ALLOWED_ORIGINS || "").split(",").map(s => s.trim().replace(/\/$/, "")).filter(Boolean);
 const DATABASE_URL = process.env.DATABASE_URL || "";
 const GAME_URL = process.env.GAME_URL || "https://petradavis.github.io/Wildborn/";
+const PLAYER_INVITES = 3;   /* Petra: each player gets 3 invites to share */
 const LIMITS = { field: 4600, presence: 7000, roomPlayers: 40, rooms: 4, msgsPerSec: 40, nameRe: /^[a-z0-9_]{3,16}$/, sessionDays: 60 };
 
 /* ---------- database (Postgres) ---------- */
@@ -38,6 +40,8 @@ const SCHEMA = `CREATE TABLE IF NOT EXISTS users (id INTEGER GENERATED ALWAYS AS
 CREATE TABLE IF NOT EXISTS invites (code TEXT PRIMARY KEY, note TEXT, created BIGINT, used_by INTEGER, used_at BIGINT);
 CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, user_id INTEGER NOT NULL, created BIGINT, last BIGINT);
 CREATE INDEX IF NOT EXISTS sessions_user ON sessions (user_id);
+ALTER TABLE invites ADD COLUMN IF NOT EXISTS owner INTEGER;
+CREATE INDEX IF NOT EXISTS invites_owner ON invites (owner);
 CREATE TABLE IF NOT EXISTS config (k TEXT PRIMARY KEY, v TEXT);`;
 const q = {
   userByName: n => one("SELECT * FROM users WHERE name = $1", [n]), userById: id => one("SELECT * FROM users WHERE id = $1", [id]),
@@ -64,10 +68,13 @@ const CODE_ABC = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const newCode = () => "WILD" + Array.from(crypto.randomBytes(5), b => CODE_ABC[b % CODE_ABC.length]).join("");
 const normCode = c => String(c || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
 const showCode = c => c.slice(0, 4) + "-" + c.slice(4);
-async function makeInvites(n, note) { const out = []; for (let i = 0; i < n; i++) { let c; do c = newCode(); while (await q.invite(c)); await q.addInvite(c, mpClean(note || "", 60), now()); out.push(showCode(c)); } return out; }
+async function makeInvites(n, note, owner, k) { const out = []; for (let i = 0; i < n; i++) { let c; do c = newCode(); while (await q.invite(c));
+    await (k || db).query("INSERT INTO invites (code, note, created, owner) VALUES ($1, $2, $3, $4)", [c, mpClean(note || "", 60), now(), owner || null]); out.push(showCode(c)); } return out; }
+/* players who don't have their own invites yet (accounts made before this rule) get theirs */
+async function giveMissingInvites() { for (const u of await all("SELECT id, name FROM users WHERE NOT EXISTS (SELECT 1 FROM invites WHERE owner = users.id)")) await makeInvites(PLAYER_INVITES, "from " + u.name, u.id); }
 async function dbStart() { await db.query(SCHEMA); for (const r of await all("SELECT k, v FROM config")) { try { CFG[r.k] = JSON.parse(r.v); } catch (e) {} }
   if (!cfg("seeded", false)) { await makeInvites(10, "first 10"); await setCfg("seeded", true); await setCfg("inviteOnly", true); console.log("First start: made 10 invite codes. See them on the admin page (/admin)."); }
-  await q.oldSessions(now() - LIMITS.sessionDays * 864e5); }
+  await giveMissingInvites(); await q.oldSessions(now() - LIMITS.sessionDays * 864e5); }
 
 /* passwords: scrypt with a random salt per account */
 const hashPw = (pw, salt) => crypto.scryptSync(String(pw), salt, 32).toString("hex");
@@ -119,6 +126,8 @@ function signedIn(c, u, token) { signOut(c); c.uid = u.id; c.name = u.name;
 async function onAuth(c, m) { if (m.tab) c.tab = m.tab; c.req = m.t; const fail = err => send(c, { t: "auth", ok: false, err, for: m.t, re: m.t });
   if (m.t === "logout") { if (m.token) await q.delSession(tokenHash(m.token)); signOut(c); return send(c, { t: "auth", ok: false, err: "", re: "logout" }); }
   if (m.t === "resume") { const s = await q.session(tokenHash(m.token)); const u = s && await q.userById(s.user_id); if (!u) return fail("signed_out"); if (u.banned) return fail("banned"); await q.touchSession(now(), tokenHash(m.token)); return signedIn(c, u, m.token); }
+  if (m.t === "myinvites") { if (!c.uid) return fail("signed_out"); const rows = await all("SELECT i.code, u.name FROM invites i LEFT JOIN users u ON u.id = i.used_by WHERE i.owner = $1 ORDER BY i.created, i.code", [c.uid]);
+    return send(c, { t: "invites", list: rows.map(r => [showCode(r.code), r.name || ""]) }); }
   if (tooMany(c.ip)) return fail("slow_down");
   const name = String(m.name || "").trim().toLowerCase(), pw = String(m.pw || "");
   if (m.t === "login") { const u = await q.userByName(name); if (!u || !checkPw(u, pw)) return fail("wrong"); if (u.banned) return fail("banned"); return signedIn(c, u, await newSession(u.id)); }
@@ -130,7 +139,7 @@ async function onAuth(c, m) { if (m.tab) c.tab = m.tab; c.req = m.t; const fail 
       const u = await tx(async k => { if (only) { const inv = (await k.query("SELECT * FROM invites WHERE code = $1 FOR UPDATE", [code])).rows[0]; if (!inv) throw new Error("bad_code"); if (inv.used_by) throw new Error("used_code"); }
         const nu = (await k.query("INSERT INTO users (name, salt, hash, invite, created, last_seen) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *", [name, salt, hash, only ? code : "", now(), now()])).rows[0];
         if (only && !(await k.query("UPDATE invites SET used_by = $1, used_at = $2 WHERE code = $3 AND used_by IS NULL", [nu.id, now(), code])).rowCount) throw new Error("used_code");
-        return nu; });
+        await makeInvites(PLAYER_INVITES, "from " + name, nu.id, k); return nu; });
       console.log("New account:", name); return signedIn(c, u, await newSession(u.id)); }
     catch (e) { return fail(e.code === "23505" ? "name_taken" : ["bad_code", "used_code"].includes(e.message) ? e.message : "error"); } }
   if (m.t === "chpw") { if (!c.uid) return fail("signed_out"); const u = await q.userById(c.uid); if (!u || !checkPw(u, m.old)) return fail("wrong_old"); if (pw.length < 6 || pw.length > 64) return fail("short_pw");
@@ -143,7 +152,7 @@ async function summary() { const online = new Set([...conns].filter(c => c.uid).
   return { inviteOnly: inviteOnly(), online: online.size, sentMB: Math.round(sentBytes() / 1e5) / 10, sentBytes: sentBytes(), since: SENT.since,
     rooms: [...rooms.entries()].map(([k, r]) => ({ room: k, players: [...r.values()].map(c => c.name) })),
     users: us.map(u => ({ name: u.name, created: u.created, lastSeen: u.last_seen, banned: !!u.banned, online: online.has(u.id), invite: u.invite ? showCode(u.invite) : "" })),
-    invites: invs.map(i => ({ code: showCode(i.code), note: i.note, created: i.created, usedBy: i.used_by ? names.get(i.used_by) || "(deleted account)" : "" })) }; }
+    gameUrl: GAME_URL, invites: invs.map(i => ({ code: showCode(i.code), note: i.note, owner: i.owner ? names.get(i.owner) || "" : "", created: i.created, usedBy: i.used_by ? names.get(i.used_by) || "(deleted account)" : "" })) }; }
 async function adminDo(a, b) { const u = b.name ? await q.userByName(String(b.name).toLowerCase()) : null;
   switch (a) {
     case "invites": return { made: await makeInvites(Math.max(1, Math.min(50, +b.count || 1)), b.note) };
@@ -188,7 +197,7 @@ wss.on("connection", (ws, req) => {
   ws.on("message", buf => { const t = now(); if (t - c.t > 1000) { c.t = t; c.n = 0; } if (++c.n > LIMITS.msgsPerSec) return;   /* too fast: drop */
     let m; try { m = JSON.parse(buf); } catch (e) { return; } if (!m || typeof m !== "object") return;
     try {
-      if (["signup", "login", "resume", "logout", "chpw"].includes(m.t)) return void onAuth(c, m).catch(e => { console.error("auth", e.message); send(c, { t: "auth", ok: false, err: "error", for: m.t, re: m.t }); });
+      if (["signup", "login", "resume", "logout", "chpw", "myinvites"].includes(m.t)) return void onAuth(c, m).catch(e => { console.error("auth", e.message); send(c, { t: "auth", ok: false, err: "error", for: m.t, re: m.t }); });
       if (!c.uid) return send(c, { t: "auth", ok: false, err: "signed_out" });
       if (m.t === "p") return presence(c, roomName(m.room), m.patch);
       if (m.t === "join") return join(c, m.room);

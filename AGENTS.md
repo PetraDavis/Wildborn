@@ -13,6 +13,14 @@ The owner is Petra. These are her standing rules and the facts an agent needs be
 - **No scams in trading** (Petra: "I don't want scamming like in Adopt Me"). Player-to-player trades warn whoever gives more, and both players must lock in. Market stalls may ask any price on purpose.
 - Petra often uses speech-to-text, so an odd word in a request is probably a misheard word.
 
+## Security rules (Petra, 2026-11-28)
+
+- **An account is required for everything.** On the website the game is covered by a sign-in screen until you're signed in, and every server feature (rooms, chat, trading, the Market) needs a signed-in account. Accounts are a username and a password only: no email and no verification.
+- **Sign-up is invite only.** You can't make an account without an invite. The admin page has an invite-only switch for later, but keep it on unless Petra says otherwise.
+- **Every player gets 3 invites.** They're single-use links, `https://petradavis.github.io/Wildborn/?invite=WILD-XXXXX`, made automatically when the account is created and listed in the player's Play together panel. A link makes exactly one account. The admin page can make extra invite links (Copy link).
+- **Petra's own account** is made with an invite link copied from the admin page, like anyone else's. Nobody else ever needs the admin key.
+- The sign-in screen is a gate in the game's code, and the game files are public (GitHub Pages and this repo). So real protection lives on the server: never add a server feature that works without a signed-in account.
+
 ## What's in this repo
 
 | Path | What it is |
